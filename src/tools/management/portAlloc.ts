@@ -86,6 +86,7 @@ function cleanupStalePorts(registry: Record<string, PortInfo>): Record<string, P
     const port = parseInt(portKey, 10);
     if (!info.lastHeartbeat || now - info.lastHeartbeat > HEARTBEAT_TIMEOUT) {
       // 端口已过期，检查是否真的被占用
+      // TODO: 需要使用同步方式检查端口
       checkPort(port).then(isOccupied => {
         if (!isOccupied) {
           delete registry[port];

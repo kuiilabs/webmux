@@ -84,6 +84,11 @@ export async function browserClick(params: BrowserClickParams): Promise<ToolResu
     return error(pageError('缺少必要参数：selector'));
   }
 
+  // 验证 selector 格式
+  if (!selector.startsWith('.') && !selector.startsWith('#') && !/^[a-z]/i.test(selector)) {
+    return error(pageError('无效的 CSS 选择器格式'));
+  }
+
   try {
     if (mode === 'js') {
       // JS click 模式
