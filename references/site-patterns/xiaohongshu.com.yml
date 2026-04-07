@@ -1,0 +1,29 @@
+# 小红书站点经验
+
+---
+
+## 平台特征
+
+- 公开笔记内容在未登录状态下通常不可获取
+- 必须使用 CDP 模式（携带登录态）才能稳定访问
+- 搜索结果页面由前端接口动态加载
+- 反爬机制较严格，频繁访问可能触发验证
+
+## 有效模式
+
+- 搜索结果 URL 模式：`https://www.xiaohongshu.com/search_result?keyword=xxx`
+- 笔记详情页：`https://www.xiaohongshu.com/explore/xxx`
+- 用户主页：`https://www.xiaohongshu.com/user/profile/xxx`
+
+## 已知陷阱
+
+- 直接访问笔记 URL 可能跳转到登录页
+- 未登录状态下部分内容显示为"笔记已删除"
+- 频繁刷新或抓取可能触发滑块验证
+
+---
+
+domain: xiaohongshu.com
+aliases: [小红书，xhs]
+schema_version: 2
+updated: 2026-04-07
