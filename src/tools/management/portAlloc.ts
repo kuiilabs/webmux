@@ -1,12 +1,12 @@
 /**
  * port_alloc 工具 - 自动分配端口（9222-9299）
- * 使用互斥锁、原子写入和租约机制防止竞态条件
+ * 使用文件锁、原子写入和租约机制防止竞态条件
  */
 
 import { success, error, networkError } from '../../shared/result.js';
 import type { ToolResult } from '../../shared/types.js';
 import { CDP_PROXY } from '../../shared/constants.js';
-import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, unlinkSync, cpSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, unlinkSync } from 'fs';
 import { join, dirname } from 'path';
 import { randomUUID } from 'crypto';
 
@@ -38,6 +38,8 @@ const PORT_REGISTRY_FILE = join(
 
 const PORT_REGISTRY_BACKUP = `${PORT_REGISTRY_FILE}.backup`;
 
+const LOCK_FILE = `${PORT_REGISTRY_FILE}.lock`;
+
 /**
  * 检查端口是否可用（快速超时）
  */
@@ -45,7 +47,7 @@ async function checkPort(port: number): Promise<boolean> {
   try {
     const response = await fetch(`http://127.0.0.1:${port}/json/version`, {
       method: 'GET',
-      signal: AbortSignal.timeout(500), // 降低超时减少阻塞
+      signal: AbortSignal.timeout(500),
     });
     return response.ok;
   } catch {
@@ -54,9 +56,80 @@ async function checkPort(port: number): Promise<boolean> {
 }
 
 /**
- * 读取端口注册表（带备份恢复和迁移）
- * 读取失败时尝试从备份恢复，仍失败则抛出错误
- * 自动迁移旧版本记录（无 leaseToken）
+ * 跨进程文件锁（使用临时文件原子创建）
+ */
+class FileMutex {
+  private lockFile: string = LOCK_FILE;
+  private held: boolean = false;
+
+  /**
+   * 尝试获取锁，使用原子 mkdir 操作
+   * mkdir 在大多数文件系统上是原子的
+   */
+  private async tryAcquireLock(): Promise<boolean> {
+    try {
+      const dir = dirname(this.lockFile);
+      mkdirSync(dir, { recursive: true });
+
+      // 使用 mkdir 原子创建锁目录
+      // 如果目录已存在，会抛出错误
+      mkdirSync(this.lockFile);
+      this.held = true;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * 释放锁（删除锁目录）
+   */
+  private releaseLock(): void {
+    if (this.held) {
+      try {
+        // 删除锁目录
+        const dir = dirname(this.lockFile);
+        const files = require('fs').readdirSync(dir);
+        // 只有锁目录为空时才删除
+        if (files.length === 0 || files.includes(this.lockFile.substring(this.lockFile.lastIndexOf('/') + 1))) {
+          require('fs').rmSync(this.lockFile, { recursive: true, force: true });
+        }
+      } catch {
+        // 忽略释放错误
+      }
+      this.held = false;
+    }
+  }
+
+  /**
+   * 获取锁，轮询直到成功
+   */
+  async acquire<T>(fn: () => Promise<T> | T): Promise<T> {
+    // 轮询获取锁
+    const maxAttempts = 100;
+    const delayMs = 50;
+
+    for (let i = 0; i < maxAttempts; i++) {
+      if (await this.tryAcquireLock()) {
+        try {
+          return await fn();
+        } finally {
+          this.releaseLock();
+        }
+      }
+      // 等待一段时间后重试
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+
+    throw new Error('获取锁超时，可能有其他进程持有锁');
+  }
+}
+
+const registryMutex = new FileMutex();
+
+/**
+ * 读取端口注册表（带备份恢复）
+ * 不在读取时迁移，迁移在写入时进行
  */
 function readRegistry(): Record<string, PortInfo> {
   const dir = dirname(PORT_REGISTRY_FILE);
@@ -68,31 +141,11 @@ function readRegistry(): Record<string, PortInfo> {
 
   try {
     const content = readFileSync(PORT_REGISTRY_FILE, 'utf-8');
-    let registry = JSON.parse(content);
+    const registry = JSON.parse(content);
 
     // 验证基本形状
     if (typeof registry !== 'object' || registry === null) {
       throw new Error('注册表格式无效');
-    }
-
-    // 迁移：为旧版本记录（无 leaseToken）回填 token
-    let migrated = false;
-    for (const info of Object.values(registry)) {
-      const portInfo = info as PortInfo;
-      if (portInfo.allocated && !portInfo.leaseToken) {
-        portInfo.leaseToken = randomUUID();
-        migrated = true;
-      }
-    }
-
-    if (migrated) {
-      // 保存迁移后的注册表
-      const backupFile = `${PORT_REGISTRY_FILE}.${randomUUID()}.tmp`;
-      writeFileSync(backupFile, JSON.stringify(registry, null, 2), 'utf-8');
-      renameSync(backupFile, PORT_REGISTRY_FILE);
-      try {
-        writeFileSync(PORT_REGISTRY_BACKUP, JSON.stringify(registry, null, 2), 'utf-8');
-      } catch {}
     }
 
     return registry as Record<string, PortInfo>;
@@ -103,8 +156,6 @@ function readRegistry(): Record<string, PortInfo> {
         const backupContent = readFileSync(PORT_REGISTRY_BACKUP, 'utf-8');
         const backupRegistry = JSON.parse(backupContent);
         if (typeof backupRegistry === 'object' && backupRegistry !== null) {
-          // 恢复备份
-          cpSync(PORT_REGISTRY_BACKUP, PORT_REGISTRY_FILE);
           return backupRegistry as Record<string, PortInfo>;
         }
       }
@@ -134,33 +185,6 @@ function writeRegistryAtomic(registry: Record<string, PortInfo>, tempFile: strin
     // 备份失败不影响主操作
   }
 }
-
-/**
- * 互斥锁实现 - 正确的序列化处理
- */
-class Mutex {
-  private lock: Promise<void> = Promise.resolve();
-
-  async acquire<T>(fn: () => Promise<T> | T): Promise<T> {
-    // 捕获当前锁，在释放前创建新锁
-    const prevLock = this.lock;
-    let release: () => void;
-    this.lock = new Promise(resolve => {
-      release = resolve;
-    });
-
-    // 等待前一个锁释放
-    await prevLock;
-
-    try {
-      return await fn();
-    } finally {
-      release!();
-    }
-  }
-}
-
-const registryMutex = new Mutex();
 
 /**
  * 在锁下执行清理和分配
@@ -270,8 +294,8 @@ export async function portAlloc(params: PortAllocParams = {}): Promise<ToolResul
 }
 
 /**
- * 释放端口（强制验证 leaseToken）
- * 支持旧版本记录自动迁移
+ * 释放端口（支持旧版本记录迁移）
+ * 对于没有 leaseToken 的旧记录，接受无 token 请求并在写入时生成 token
  */
 export async function portRelease(params: { port: number; leaseToken?: string }): Promise<ToolResult<{ port: number; released: boolean }>> {
   const { port, leaseToken } = params;
@@ -293,30 +317,22 @@ export async function portRelease(params: { port: number; leaseToken?: string })
 
       const portInfo = registry[portKey];
 
-      // 迁移：如果记录没有 leaseToken，自动生成并保存
+      // 迁移：如果记录没有 leaseToken，接受请求并生成 token（首次适应）
       if (portInfo.allocated && !portInfo.leaseToken) {
-        const newToken = randomUUID();
-        registry[portKey] = {
-          ...portInfo,
-          leaseToken: newToken,
-        };
-        writeRegistryAtomic(registry, tempFile);
-        // 对于迁移的记录，接受首次请求（无 token 或任意 token）
-        // 但 subsequent 请求必须提供正确的 token
-        // 为简化，这里直接释放
+        // 旧记录，接受无 token 请求
         delete registry[portKey];
         released = true;
+        writeRegistryAtomic(registry, tempFile);
         return;
       }
 
-      // 强制验证 lease token
-      if (leaseToken && portInfo.leaseToken && portInfo.leaseToken !== leaseToken) {
+      // 新记录，必须验证 lease token
+      if (!leaseToken) {
         tokenMismatch = true;
         return;
       }
 
-      // 如果没有提供 leaseToken 且记录有 token，拒绝（防止未授权释放）
-      if (!leaseToken && portInfo.leaseToken) {
+      if (portInfo.leaseToken !== leaseToken) {
         tokenMismatch = true;
         return;
       }
@@ -359,8 +375,8 @@ export async function portRelease(params: { port: number; leaseToken?: string })
 }
 
 /**
- * 更新端口心跳（强制验证 leaseToken）
- * 支持旧版本记录自动迁移
+ * 更新端口心跳（支持旧版本记录迁移）
+ * 对于没有 leaseToken 的旧记录，接受无 token 请求并在写入时生成 token
  */
 export async function portHeartbeat(params: { port: number; leaseToken?: string }): Promise<ToolResult<{ port: number; ok: boolean }>> {
   const { port, leaseToken } = params;
@@ -382,8 +398,9 @@ export async function portHeartbeat(params: { port: number; leaseToken?: string 
 
       const portInfo = registry[portKey];
 
-      // 迁移：如果记录没有 leaseToken，自动生成并保存
+      // 迁移：如果记录没有 leaseToken，接受请求并生成 token
       if (portInfo.allocated && !portInfo.leaseToken) {
+        // 旧记录，接受无 token 请求，生成 token
         const newToken = randomUUID();
         registry[portKey] = {
           ...portInfo,
@@ -391,19 +408,17 @@ export async function portHeartbeat(params: { port: number; leaseToken?: string 
           lastHeartbeat: Date.now(),
         };
         writeRegistryAtomic(registry, tempFile);
-        // 对于迁移的记录，接受首次心跳请求
         ok = true;
         return;
       }
 
-      // 强制验证 lease token
-      if (leaseToken && portInfo.leaseToken && portInfo.leaseToken !== leaseToken) {
+      // 新记录，必须验证 lease token
+      if (!leaseToken) {
         tokenMismatch = true;
         return;
       }
 
-      // 如果没有提供 leaseToken 且记录有 token，拒绝
-      if (!leaseToken && portInfo.leaseToken) {
+      if (portInfo.leaseToken !== leaseToken) {
         tokenMismatch = true;
         return;
       }
