@@ -54,8 +54,9 @@ async function checkPort(port: number): Promise<boolean> {
 }
 
 /**
- * 读取端口注册表（带备份恢复）
+ * 读取端口注册表（带备份恢复和迁移）
  * 读取失败时尝试从备份恢复，仍失败则抛出错误
+ * 自动迁移旧版本记录（无 leaseToken）
  */
 function readRegistry(): Record<string, PortInfo> {
   const dir = dirname(PORT_REGISTRY_FILE);
@@ -67,11 +68,31 @@ function readRegistry(): Record<string, PortInfo> {
 
   try {
     const content = readFileSync(PORT_REGISTRY_FILE, 'utf-8');
-    const registry = JSON.parse(content);
+    let registry = JSON.parse(content);
 
     // 验证基本形状
     if (typeof registry !== 'object' || registry === null) {
       throw new Error('注册表格式无效');
+    }
+
+    // 迁移：为旧版本记录（无 leaseToken）回填 token
+    let migrated = false;
+    for (const info of Object.values(registry)) {
+      const portInfo = info as PortInfo;
+      if (portInfo.allocated && !portInfo.leaseToken) {
+        portInfo.leaseToken = randomUUID();
+        migrated = true;
+      }
+    }
+
+    if (migrated) {
+      // 保存迁移后的注册表
+      const backupFile = `${PORT_REGISTRY_FILE}.${randomUUID()}.tmp`;
+      writeFileSync(backupFile, JSON.stringify(registry, null, 2), 'utf-8');
+      renameSync(backupFile, PORT_REGISTRY_FILE);
+      try {
+        writeFileSync(PORT_REGISTRY_BACKUP, JSON.stringify(registry, null, 2), 'utf-8');
+      } catch {}
     }
 
     return registry as Record<string, PortInfo>;
@@ -142,104 +163,84 @@ class Mutex {
 const registryMutex = new Mutex();
 
 /**
- * 检测端口状态（在锁外执行）
+ * 在锁下执行清理和分配
+ * 所有状态检查和写入都在同一锁持有期间完成，避免竞态
  */
-async function probePortStatus(registry: Record<string, PortInfo>): Promise<{
-  staleOccupied: string[];
-  staleFree: string[];
-  freePorts: number[];
+async function performAllocation(
+  registry: Record<string, PortInfo>,
+  count: number
+): Promise<{
+  registry: Record<string, PortInfo>;
+  allocatedPorts: number[];
+  leaseTokens: Record<number, string>;
 }> {
   const now = Date.now();
   const HEARTBEAT_TIMEOUT = 30000;
+  const allocatedPorts: number[] = [];
+  const leaseTokens: Record<number, string> = {};
 
-  const staleOccupied: string[] = [];
-  const staleFree: string[] = [];
-  const freePorts: number[] = [];
-
-  // 检查过期端口
+  // 步骤 1: 清理过期端口（在锁下实时检查）
   for (const [portKey, info] of Object.entries(registry)) {
     const port = parseInt(portKey, 10);
     if (!info.lastHeartbeat || now - info.lastHeartbeat > HEARTBEAT_TIMEOUT) {
+      // 端口已过期，实时检查是否真的被占用
       const isOccupied = await checkPort(port);
       if (isOccupied) {
-        staleOccupied.push(portKey);
+        // 端口仍被占用，保留并刷新心跳
+        registry[portKey] = {
+          ...info,
+          lastHeartbeat: now,
+        };
       } else {
-        staleFree.push(portKey);
+        // 端口未被占用，删除
+        delete registry[portKey];
       }
     }
   }
 
-  // 扫描可用端口（在锁外进行，减少阻塞）
-  for (let port = CDP_PROXY.PORT_RANGE_START; port <= CDP_PROXY.PORT_RANGE_END; port++) {
+  // 步骤 2: 分配新端口
+  for (let port = CDP_PROXY.PORT_RANGE_START; port <= CDP_PROXY.PORT_RANGE_END && allocatedPorts.length < count; port++) {
     const portKey = port.toString();
     const portInfo = registry[portKey];
-    if (!portInfo || !portInfo.allocated) {
-      const isOccupied = await checkPort(port);
-      if (!isOccupied) {
-        freePorts.push(port);
-      }
+
+    // 检查端口是否已分配
+    if (portInfo?.allocated) {
+      continue; // 已有分配的端口，跳过
+    }
+
+    // 实时检查端口是否被占用
+    const isOccupied = await checkPort(port);
+    if (!isOccupied) {
+      const leaseToken = randomUUID();
+      allocatedPorts.push(port);
+      leaseTokens[port] = leaseToken;
+      registry[portKey] = {
+        port,
+        allocated: true,
+        allocatedAt: Date.now(),
+        leaseToken,
+        lastHeartbeat: Date.now(),
+      };
     }
   }
 
-  return { staleOccupied, staleFree, freePorts };
+  return { registry, allocatedPorts, leaseTokens };
 }
 
 export async function portAlloc(params: PortAllocParams = {}): Promise<ToolResult<PortAllocResult>> {
   const { count = 1 } = params;
 
-  const allocatedPorts: number[] = [];
-  const leaseTokens: Record<number, string> = {};
   const tempFile = `${PORT_REGISTRY_FILE}.${randomUUID()}.tmp`;
+  let allocatedPorts: number[] = [];
+  let leaseTokens: Record<number, string> = {};
 
   try {
-    // 步骤 1: 在锁外探测端口状态（减少锁持有时间）
-    let registry = await registryMutex.acquire(() => readRegistry());
-    let probeResult = await probePortStatus(registry);
-
-    // 步骤 2: 获取锁，执行原子更新
     await registryMutex.acquire(async () => {
-      // 重新读取最新状态
-      registry = readRegistry();
-
-      // 更新过期但仍占用的端口心跳
-      for (const portKey of probeResult.staleOccupied) {
-        if (registry[portKey]) {
-          registry[portKey] = {
-            ...registry[portKey],
-            lastHeartbeat: Date.now(),
-          };
-        }
-      }
-
-      // 删除过期且空闲的端口
-      for (const portKey of probeResult.staleFree) {
-        delete registry[portKey];
-      }
-
-      // 分配端口
-      for (const port of probeResult.freePorts) {
-        if (allocatedPorts.length >= count) break;
-
-        const portKey = port.toString();
-        // 双重检查端口未被其他调用者分配
-        if (registry[portKey]?.allocated) {
-          continue;
-        }
-
-        const leaseToken = randomUUID();
-        allocatedPorts.push(port);
-        leaseTokens[port] = leaseToken;
-        registry[portKey] = {
-          port,
-          allocated: true,
-          allocatedAt: Date.now(),
-          leaseToken,
-          lastHeartbeat: Date.now(),
-        };
-      }
-
-      // 原子写入注册表
-      writeRegistryAtomic(registry, tempFile);
+      const registry = readRegistry();
+      const result = await performAllocation(registry, count);
+      allocatedPorts = result.allocatedPorts;
+      leaseTokens = result.leaseTokens;
+      writeRegistryAtomic(result.registry, tempFile);
     });
   } catch (err) {
     // 清理临时文件
@@ -270,16 +271,11 @@ export async function portAlloc(params: PortAllocParams = {}): Promise<ToolResul
 
 /**
  * 释放端口（强制验证 leaseToken）
+ * 支持旧版本记录自动迁移
  */
-export async function portRelease(params: { port: number; leaseToken: string }): Promise<ToolResult<{ port: number; released: boolean }>> {
+export async function portRelease(params: { port: number; leaseToken?: string }): Promise<ToolResult<{ port: number; released: boolean }>> {
   const { port, leaseToken } = params;
   const tempFile = `${PORT_REGISTRY_FILE}.${randomUUID()}.tmp`;
-
-  if (!leaseToken) {
-    return error(
-      networkError('缺少必要参数：leaseToken')
-    );
-  }
 
   let released = false;
   let notFound = false;
@@ -295,8 +291,32 @@ export async function portRelease(params: { port: number; leaseToken: string }):
         return;
       }
 
+      const portInfo = registry[portKey];
+
+      // 迁移：如果记录没有 leaseToken，自动生成并保存
+      if (portInfo.allocated && !portInfo.leaseToken) {
+        const newToken = randomUUID();
+        registry[portKey] = {
+          ...portInfo,
+          leaseToken: newToken,
+        };
+        writeRegistryAtomic(registry, tempFile);
+        // 对于迁移的记录，接受首次请求（无 token 或任意 token）
+        // 但 subsequent 请求必须提供正确的 token
+        // 为简化，这里直接释放
+        delete registry[portKey];
+        released = true;
+        return;
+      }
+
       // 强制验证 lease token
-      if (registry[portKey].leaseToken !== leaseToken) {
+      if (leaseToken && portInfo.leaseToken && portInfo.leaseToken !== leaseToken) {
+        tokenMismatch = true;
+        return;
+      }
+
+      // 如果没有提供 leaseToken 且记录有 token，拒绝（防止未授权释放）
+      if (!leaseToken && portInfo.leaseToken) {
         tokenMismatch = true;
         return;
       }
@@ -340,16 +360,11 @@ export async function portRelease(params: { port: number; leaseToken: string }):
 
 /**
  * 更新端口心跳（强制验证 leaseToken）
+ * 支持旧版本记录自动迁移
  */
-export async function portHeartbeat(params: { port: number; leaseToken: string }): Promise<ToolResult<{ port: number; ok: boolean }>> {
+export async function portHeartbeat(params: { port: number; leaseToken?: string }): Promise<ToolResult<{ port: number; ok: boolean }>> {
   const { port, leaseToken } = params;
   const tempFile = `${PORT_REGISTRY_FILE}.${randomUUID()}.tmp`;
-
-  if (!leaseToken) {
-    return error(
-      networkError('缺少必要参数：leaseToken')
-    );
-  }
 
   let ok = false;
   let notFound = false;
@@ -365,8 +380,30 @@ export async function portHeartbeat(params: { port: number; leaseToken: string }
         return;
       }
 
+      const portInfo = registry[portKey];
+
+      // 迁移：如果记录没有 leaseToken，自动生成并保存
+      if (portInfo.allocated && !portInfo.leaseToken) {
+        const newToken = randomUUID();
+        registry[portKey] = {
+          ...portInfo,
+          leaseToken: newToken,
+          lastHeartbeat: Date.now(),
+        };
+        writeRegistryAtomic(registry, tempFile);
+        // 对于迁移的记录，接受首次心跳请求
+        ok = true;
+        return;
+      }
+
       // 强制验证 lease token
-      if (registry[portKey].leaseToken !== leaseToken) {
+      if (leaseToken && portInfo.leaseToken && portInfo.leaseToken !== leaseToken) {
+        tokenMismatch = true;
+        return;
+      }
+
+      // 如果没有提供 leaseToken 且记录有 token，拒绝
+      if (!leaseToken && portInfo.leaseToken) {
         tokenMismatch = true;
         return;
       }
