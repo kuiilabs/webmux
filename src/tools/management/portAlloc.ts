@@ -6,7 +6,7 @@
 import { success, error, networkError } from '../../shared/result.js';
 import type { ToolResult } from '../../shared/types.js';
 import { CDP_PROXY } from '../../shared/constants.js';
-import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, unlinkSync, rmSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, unlinkSync, rmSync, statSync } from 'fs';
 import { join, dirname } from 'path';
 import { randomUUID } from 'crypto';
 
@@ -115,10 +115,31 @@ function writeLockMeta(meta: LockMetadata): void {
 
 /**
  * 清理过期锁
+ * 如果锁目录存在但元数据不存在，需要检查目录年龄以避免误删正在创建中的锁
  */
 function cleanupStaleLock(): void {
+  // 检查锁目录是否存在
+  if (!existsSync(LOCK_DIR)) {
+    return;
+  }
+
   const meta = readLockMeta();
+
+  // 如果元数据不存在，检查锁目录的创建时间
+  // 这避免了误删正在写入 meta.json 的活跃锁（mkdir 和 writeFile 之间的时间窗口）
   if (!meta) {
+    try {
+      const stat = statSync(LOCK_DIR);
+      const dirMtime = stat.mtimeMs;
+      const now = Date.now();
+      // 只有目录超过 1 秒未写入 meta.json，才视为孤儿锁
+      // 正常情况下的写入应该在几毫秒内完成
+      if (now - dirMtime > 1000) {
+        rmSync(LOCK_DIR, { recursive: true, force: true });
+      }
+    } catch {
+      // 无法获取目录信息，保守处理，不删除
+    }
     return;
   }
 
