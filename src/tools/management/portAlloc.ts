@@ -438,12 +438,12 @@ export async function portAlloc(params: PortAllocParams = {}): Promise<ToolResul
   let leaseTokens: Record<number, string> = {};
 
   try {
-    // 步骤 1: 在锁外读取注册表并探测端口状态
-    await registryMutex.acquire(async () => {
-      const registry = readRegistry();
-      const probeResult = await probePortStatus(registry, count);
+    // 步骤 1: 在锁外读取注册表并探测端口状态（收集候选列表）
+    const registry = readRegistry();
+    const probeResult = await probePortStatus(registry, count);
 
-      // 步骤 2: 重新读取最新状态并基于探测结果更新
+    // 步骤 2: 在锁内重新读取注册表并二次验证候选端口
+    await registryMutex.acquire(async () => {
       const freshRegistry = readRegistry();
       const result = await updateRegistryFromProbe(freshRegistry, probeResult, count);
       allocatedPorts = result.allocatedPorts;
@@ -468,10 +468,26 @@ export async function portAlloc(params: PortAllocParams = {}): Promise<ToolResul
     );
   }
 
+  // 构建兼容性响应：同时包含旧格式（registry）和新格式（leaseTokens）
+  // 旧客户端可以继续使用 registry，新客户端应该使用 leaseTokens
+  const compatibilityRegistry: Record<string, PortInfo> = {};
+  for (let i = 0; i < allocatedPorts.length; i++) {
+    const port = allocatedPorts[i];
+    const portKey = port.toString();
+    compatibilityRegistry[portKey] = {
+      port,
+      allocated: true,
+      allocatedAt: Date.now(),
+      leaseToken: leaseTokens[port],
+      lastHeartbeat: Date.now(),
+    };
+  }
+
   return success(
     {
       ports: allocatedPorts,
       leaseTokens,
+      registry: compatibilityRegistry, // 向后兼容字段，旧客户端可使用
     },
     `已分配 ${allocatedPorts.length} 个端口：${allocatedPorts.join(', ')}（leaseToken 已返回，请妥善保管用于释放和心跳）`
   );
@@ -479,8 +495,13 @@ export async function portAlloc(params: PortAllocParams = {}): Promise<ToolResul
 
 /**
  * 释放端口（支持旧版本记录和新版本记录）
- * 对于没有 leaseToken 的记录（旧版本），首次操作时生成并回填 token
- * 对于有 leaseToken 的记录（新版本），必须验证 token
+ *
+ * 迁移策略（升级期间预期行为）：
+ * - 旧记录（无 leaseToken）：首次操作时生成并回填 token，然后执行请求
+ *   注意：这意味着在升级期间，任何知道端口号的调用者都可以迁移旧记录。
+ *   这是为了平滑升级的设计决策，不是安全漏洞。
+ *   建议：尽快升级所有客户端到新协议，旧记录会在一次操作后转换为新协议。
+ * - 新版本记录（有 leaseToken）：必须验证 token
  */
 export async function portRelease(params: { port: number; leaseToken?: string }): Promise<ToolResult<{ port: number; released: boolean; migratedToken?: string }>> {
   const { port, leaseToken } = params;
@@ -507,6 +528,7 @@ export async function portRelease(params: { port: number; leaseToken?: string })
       // 新版本记录（有 leaseToken）：必须验证 token
       if (!portInfo.leaseToken) {
         // 旧记录，生成新 token 并回填
+        // 注意：升级期间的预期行为，任何调用者都可以迁移旧记录
         migratedToken = randomUUID();
         registry[portKey] = {
           ...portInfo,
@@ -562,8 +584,13 @@ export async function portRelease(params: { port: number; leaseToken?: string })
 
 /**
  * 更新端口心跳（支持旧版本记录和新版本记录）
- * 对于没有 leaseToken 的记录（旧版本），首次操作时生成并回填 token
- * 对于有 leaseToken 的记录（新版本），必须验证 token
+ *
+ * 迁移策略（升级期间预期行为）：
+ * - 旧记录（无 leaseToken）：首次操作时生成并回填 token，然后执行请求
+ *   注意：这意味着在升级期间，任何知道端口号的调用者都可以迁移旧记录。
+ *   这是为了平滑升级的设计决策，不是安全漏洞。
+ *   建议：尽快升级所有客户端到新协议，旧记录会在一次操作后转换为新协议。
+ * - 新版本记录（有 leaseToken）：必须验证 token
  */
 export async function portHeartbeat(params: { port: number; leaseToken?: string }): Promise<ToolResult<PortHeartbeatResult & { migratedToken?: string }>> {
   const { port, leaseToken } = params;
@@ -590,6 +617,7 @@ export async function portHeartbeat(params: { port: number; leaseToken?: string 
       // 新版本记录（有 leaseToken）：必须验证 token
       if (!portInfo.leaseToken) {
         // 旧记录，生成新 token 并回填
+        // 注意：升级期间的预期行为，任何调用者都可以迁移旧记录
         migratedToken = randomUUID();
         registry[portKey] = {
           ...portInfo,
