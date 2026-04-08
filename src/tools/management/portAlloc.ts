@@ -287,6 +287,7 @@ function writeRegistryAtomic(registry: Record<string, PortInfo>, tempFile: strin
 /**
  * 在锁外探测端口状态
  * 返回探测结果供锁内更新使用
+ * 注意：锁外探测结果可能过期，锁内需要二次验证
  */
 async function probePortStatus(
   registry: Record<string, PortInfo>,
@@ -294,19 +295,17 @@ async function probePortStatus(
 ): Promise<{
   staleOccupied: string[];
   staleFree: string[];
-  freePorts: number[];
-  occupiedPorts: Set<string>;
-  probedAllocatedPorts: Set<string>;
+  candidateFreePorts: number[];
+  candidateStaleAllocatedPorts: Set<string>;
 }> {
   const now = Date.now();
   const HEARTBEAT_TIMEOUT = 30000;
   const staleOccupied: string[] = [];
   const staleFree: string[] = [];
-  const freePorts: number[] = [];
-  const occupiedPorts = new Set<string>();
-  const probedAllocatedPorts = new Set<string>();
+  const candidateFreePorts: number[] = [];
+  const candidateStaleAllocatedPorts = new Set<string>();
 
-  // 检查过期端口
+  // 检查过期端口（心跳超时）
   for (const [portKey, info] of Object.entries(registry)) {
     const port = parseInt(portKey, 10);
     if (!info.lastHeartbeat || now - info.lastHeartbeat > HEARTBEAT_TIMEOUT) {
@@ -319,52 +318,49 @@ async function probePortStatus(
     }
   }
 
-  // 扫描整个端口范围，收集所有可用端口和已分配端口状态
+  // 扫描整个端口范围，收集候选端口
+  // 注意：这些只是候选，锁内需要二次验证
   for (let port = CDP_PROXY.PORT_RANGE_START; port <= CDP_PROXY.PORT_RANGE_END; port++) {
     const portKey = port.toString();
     const portInfo = registry[portKey];
 
     if (portInfo?.allocated) {
-      // 实时检查已分配端口是否仍被占用（检测崩溃的持有者）
-      probedAllocatedPorts.add(portKey);
-      const isOccupied = await checkPort(port);
-      if (isOccupied) {
-        occupiedPorts.add(portKey);
+      // 心跳超时的已分配端口，候选释放（锁内二次验证）
+      if (!portInfo.lastHeartbeat || now - portInfo.lastHeartbeat > HEARTBEAT_TIMEOUT) {
+        candidateStaleAllocatedPorts.add(portKey);
       }
-      // 未占用的已分配端口将在锁内被释放
     } else {
-      // 未分配的端口，检查是否可用
-      if (freePorts.length < count) {
+      // 未分配的端口，候选可用（锁内二次验证）
+      if (candidateFreePorts.length < count) {
         const isOccupied = await checkPort(port);
         if (!isOccupied) {
-          freePorts.push(port);
+          candidateFreePorts.push(port);
         }
       }
     }
   }
 
-  return { staleOccupied, staleFree, freePorts, occupiedPorts, probedAllocatedPorts };
+  return { staleOccupied, staleFree, candidateFreePorts, candidateStaleAllocatedPorts };
 }
 
 /**
  * 在锁下执行注册表更新
  * 基于锁外探测结果进行原子更新
- * 只删除已探测且确认未占用的端口，不影响未探测的活跃租约
+ * 在锁内对候选端口进行二次验证，确保状态未变化
  */
-function updateRegistryFromProbe(
+async function updateRegistryFromProbe(
   registry: Record<string, PortInfo>,
   probeResult: {
     staleOccupied: string[];
     staleFree: string[];
-    freePorts: number[];
-    occupiedPorts: Set<string>;
-    probedAllocatedPorts: Set<string>;
+    candidateFreePorts: number[];
+    candidateStaleAllocatedPorts: Set<string>;
   },
   count: number
-): {
+): Promise<{
   allocatedPorts: number[];
   leaseTokens: Record<number, string>;
-} {
+}> {
   const allocatedPorts: number[] = [];
   const leaseTokens: Record<number, string> = {};
 
@@ -383,22 +379,40 @@ function updateRegistryFromProbe(
     delete registry[portKey];
   }
 
-  // 只释放已探测但实际未占用的端口（不删除未探测的活跃租约）
-  for (const portKey of probeResult.probedAllocatedPorts) {
-    if (!probeResult.occupiedPorts.has(portKey)) {
-      // 已探测但未占用，释放
-      delete registry[portKey];
+  // 二次验证：释放心跳超时且实际未占用的端口
+  for (const portKey of probeResult.candidateStaleAllocatedPorts) {
+    const port = parseInt(portKey, 10);
+    const portInfo = registry[portKey];
+
+    // 再次检查：端口记录是否仍存在且心跳仍超时
+    if (!portInfo || !portInfo.allocated) {
+      continue; // 已被其他调用者修改
+    }
+    if (!portInfo.lastHeartbeat || Date.now() - portInfo.lastHeartbeat > 30000) {
+      // 心跳仍超时，二次验证端口是否被占用
+      const isOccupied = await checkPort(port);
+      if (!isOccupied) {
+        // 确认未占用，安全释放
+        delete registry[portKey];
+      }
     }
   }
 
-  // 分配新端口
-  for (const port of probeResult.freePorts) {
+  // 二次验证：分配候选可用端口
+  for (const port of probeResult.candidateFreePorts) {
     if (allocatedPorts.length >= count) break;
 
     const portKey = port.toString();
-    // 双重检查端口未被其他调用者分配
+
+    // 二次检查：端口记录是否仍存在
     if (registry[portKey]?.allocated) {
-      continue;
+      continue; // 已被其他调用者分配
+    }
+
+    // 二次验证：端口是否仍可用
+    const isOccupied = await checkPort(port);
+    if (isOccupied) {
+      continue; // 端口已被占用，跳过
     }
 
     const leaseToken = randomUUID();
@@ -425,18 +439,16 @@ export async function portAlloc(params: PortAllocParams = {}): Promise<ToolResul
 
   try {
     // 步骤 1: 在锁外读取注册表并探测端口状态
-    let registry = await registryMutex.acquire(() => readRegistry());
-    const probeResult = await probePortStatus(registry, count);
-
-    // 步骤 2: 在锁内更新注册表
     await registryMutex.acquire(async () => {
-      // 重新读取最新状态
-      registry = readRegistry();
-      // 基于探测结果更新
-      const result = updateRegistryFromProbe(registry, probeResult, count);
+      const registry = readRegistry();
+      const probeResult = await probePortStatus(registry, count);
+
+      // 步骤 2: 重新读取最新状态并基于探测结果更新
+      const freshRegistry = readRegistry();
+      const result = await updateRegistryFromProbe(freshRegistry, probeResult, count);
       allocatedPorts = result.allocatedPorts;
       leaseTokens = result.leaseTokens;
-      writeRegistryAtomic(registry, tempFile);
+      writeRegistryAtomic(freshRegistry, tempFile);
     });
   } catch (err) {
     // 清理临时文件
