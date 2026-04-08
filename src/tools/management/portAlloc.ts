@@ -29,6 +29,12 @@ interface PortInfo {
   lastHeartbeat?: number;
 }
 
+interface LockMetadata {
+  pid: number;
+  timestamp: number;
+  uuid: string;
+}
+
 const PORT_REGISTRY_FILE = join(
   process.env.HOME || '/tmp',
   '.cache',
@@ -38,7 +44,16 @@ const PORT_REGISTRY_FILE = join(
 
 const PORT_REGISTRY_BACKUP = `${PORT_REGISTRY_FILE}.backup`;
 
-const LOCK_FILE = `${PORT_REGISTRY_FILE}.lock`;
+const LOCK_DIR = join(
+  process.env.HOME || '/tmp',
+  '.cache',
+  'web-agent',
+  'ports.lock'
+);
+
+const LOCK_META_FILE = join(LOCK_DIR, 'meta.json');
+
+const LOCK_TIMEOUT_MS = 30000; // 30 秒锁超时
 
 /**
  * 检查端口是否可用（快速超时）
@@ -56,25 +71,90 @@ async function checkPort(port: number): Promise<boolean> {
 }
 
 /**
- * 跨进程文件锁（使用临时文件原子创建）
+ * 检查进程是否存活
+ */
+function isProcessAlive(pid: number): boolean {
+  try {
+    // 发送信号 0 检查进程是否存在
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 读取锁元数据
+ */
+function readLockMeta(): LockMetadata | null {
+  try {
+    if (!existsSync(LOCK_META_FILE)) {
+      return null;
+    }
+    const content = readFileSync(LOCK_META_FILE, 'utf-8');
+    return JSON.parse(content) as LockMetadata;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 写入锁元数据
+ */
+function writeLockMeta(meta: LockMetadata): void {
+  const dir = dirname(LOCK_META_FILE);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(LOCK_META_FILE, JSON.stringify(meta), 'utf-8');
+}
+
+/**
+ * 清理过期锁
+ */
+function cleanupStaleLock(): void {
+  const meta = readLockMeta();
+  if (!meta) {
+    return;
+  }
+
+  const now = Date.now();
+  const isExpired = (now - meta.timestamp) > LOCK_TIMEOUT_MS;
+  const isDeadProcess = !isProcessAlive(meta.pid);
+
+  if (isExpired || isDeadProcess) {
+    // 锁已过期或进程已死亡，清理
+    try {
+      rmSync(LOCK_DIR, { recursive: true, force: true });
+    } catch {}
+  }
+}
+
+/**
+ * 跨进程文件锁（使用带元数据的锁目录）
  */
 class FileMutex {
-  private lockFile: string = LOCK_FILE;
-  private held: boolean = false;
+  private lockMeta: LockMetadata | null = null;
 
   /**
-   * 尝试获取锁，使用原子 mkdir 操作
-   * mkdir 在大多数文件系统上是原子的
+   * 尝试获取锁
    */
   private async tryAcquireLock(): Promise<boolean> {
     try {
-      const dir = dirname(this.lockFile);
-      mkdirSync(dir, { recursive: true });
+      // 首先检查是否有过期锁
+      cleanupStaleLock();
 
-      // 使用 mkdir 原子创建锁目录
-      // 如果目录已存在，会抛出错误
-      mkdirSync(this.lockFile);
-      this.held = true;
+      // 尝试创建锁目录
+      const dir = dirname(LOCK_DIR);
+      mkdirSync(dir, { recursive: true });
+      mkdirSync(LOCK_DIR);
+
+      // 写入锁元数据
+      this.lockMeta = {
+        pid: process.pid,
+        timestamp: Date.now(),
+        uuid: randomUUID(),
+      };
+      writeLockMeta(this.lockMeta);
+
       return true;
     } catch {
       return false;
@@ -82,17 +162,14 @@ class FileMutex {
   }
 
   /**
-   * 释放锁（删除锁目录）
+   * 释放锁
    */
   private releaseLock(): void {
-    if (this.held) {
-      try {
-        // 删除锁目录
-        rmSync(this.lockFile, { recursive: true, force: true });
-      } catch {
-        // 忽略释放错误
-      }
-      this.held = false;
+    try {
+      rmSync(LOCK_DIR, { recursive: true, force: true });
+      this.lockMeta = null;
+    } catch {
+      // 忽略释放错误
     }
   }
 
@@ -100,7 +177,6 @@ class FileMutex {
    * 获取锁，轮询直到成功
    */
   async acquire<T>(fn: () => Promise<T> | T): Promise<T> {
-    // 轮询获取锁
     const maxAttempts = 100;
     const delayMs = 50;
 
@@ -217,14 +293,20 @@ async function performAllocation(
     }
   }
 
-  // 步骤 2: 分配新端口
+  // 步骤 2: 分配新端口（包括实时检查已分配端口）
   for (let port = CDP_PROXY.PORT_RANGE_START; port <= CDP_PROXY.PORT_RANGE_END && allocatedPorts.length < count; port++) {
     const portKey = port.toString();
     const portInfo = registry[portKey];
 
     // 检查端口是否已分配
     if (portInfo?.allocated) {
-      continue; // 已有分配的端口，跳过
+      // 实时检查端口是否仍被占用（检测崩溃的持有者）
+      const isOccupied = await checkPort(port);
+      if (isOccupied) {
+        continue; // 端口仍被占用，跳过
+      }
+      // 端口已分配但实际未被占用，释放它
+      delete registry[portKey];
     }
 
     // 实时检查端口是否被占用
@@ -289,8 +371,8 @@ export async function portAlloc(params: PortAllocParams = {}): Promise<ToolResul
 }
 
 /**
- * 释放端口（支持旧版本记录迁移）
- * 对于没有 leaseToken 的旧记录，接受无 token 请求并在写入时生成 token
+ * 释放端口（支持旧版本记录和新版本记录）
+ * 对于没有 leaseToken 的记录，接受无 token 请求
  */
 export async function portRelease(params: { port: number; leaseToken?: string }): Promise<ToolResult<{ port: number; released: boolean }>> {
   const { port, leaseToken } = params;
@@ -312,16 +394,15 @@ export async function portRelease(params: { port: number; leaseToken?: string })
 
       const portInfo = registry[portKey];
 
-      // 迁移：如果记录没有 leaseToken，接受请求并生成 token（首次适应）
-      if (portInfo.allocated && !portInfo.leaseToken) {
-        // 旧记录，接受无 token 请求
+      // 向后兼容：如果记录没有 leaseToken，接受无 token 请求
+      if (!portInfo.leaseToken) {
         delete registry[portKey];
         released = true;
         writeRegistryAtomic(registry, tempFile);
         return;
       }
 
-      // 新记录，必须验证 lease token
+      // 有 leaseToken 的记录，必须验证
       if (!leaseToken) {
         tokenMismatch = true;
         return;
@@ -335,7 +416,6 @@ export async function portRelease(params: { port: number; leaseToken?: string })
       delete registry[portKey];
       released = true;
 
-      // 原子写入注册表
       writeRegistryAtomic(registry, tempFile);
     });
   } catch (err) {
@@ -370,8 +450,8 @@ export async function portRelease(params: { port: number; leaseToken?: string })
 }
 
 /**
- * 更新端口心跳（支持旧版本记录迁移）
- * 对于没有 leaseToken 的旧记录，始终接受无 token 请求
+ * 更新端口心跳（支持旧版本记录和新版本记录）
+ * 对于没有 leaseToken 的记录，接受无 token 请求
  */
 export async function portHeartbeat(params: { port: number; leaseToken?: string }): Promise<ToolResult<{ port: number; ok: boolean }>> {
   const { port, leaseToken } = params;
@@ -393,10 +473,8 @@ export async function portHeartbeat(params: { port: number; leaseToken?: string 
 
       const portInfo = registry[portKey];
 
-      // 迁移：如果记录没有 leaseToken，生成 token 但保持接受无 token 请求
-      // 这样旧调用者可以继续心跳，同时新调用者可以使用 token
+      // 向后兼容：如果记录没有 leaseToken，接受无 token 请求并生成 token
       if (!portInfo.leaseToken) {
-        // 旧记录，生成 token 并保存
         const newToken = randomUUID();
         registry[portKey] = {
           ...portInfo,
@@ -422,7 +500,6 @@ export async function portHeartbeat(params: { port: number; leaseToken?: string 
       registry[portKey].lastHeartbeat = Date.now();
       ok = true;
 
-      // 原子写入注册表
       writeRegistryAtomic(registry, tempFile);
     });
   } catch (err) {
