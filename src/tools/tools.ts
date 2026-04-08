@@ -320,9 +320,10 @@ export async function registerTools(server: McpServer) {
   server.registerTool(
     'port_release',
     {
-      description: '释放已分配的端口',
+      description: '释放已分配的端口（需要提供分配时返回的 leaseToken）',
       inputSchema: {
         port: z.number().describe('要释放的端口号'),
+        leaseToken: z.string().describe('分配端口时返回的 leaseToken'),
       },
     },
     wrapHandler(portRelease)
@@ -331,9 +332,10 @@ export async function registerTools(server: McpServer) {
   server.registerTool(
     'port_heartbeat',
     {
-      description: '更新端口心跳（延长租约）',
+      description: '更新端口心跳（延长租约，需要提供分配时返回的 leaseToken）',
       inputSchema: {
         port: z.number().describe('要更新心跳的端口号'),
+        leaseToken: z.string().describe('分配端口时返回的 leaseToken'),
       },
     },
     wrapHandler(portHeartbeat)
