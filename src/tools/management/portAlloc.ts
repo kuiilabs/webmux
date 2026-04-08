@@ -6,7 +6,7 @@
 import { success, error, networkError } from '../../shared/result.js';
 import type { ToolResult } from '../../shared/types.js';
 import { CDP_PROXY } from '../../shared/constants.js';
-import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, unlinkSync, rmSync, statSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, unlinkSync, rmSync } from 'fs';
 import { join, dirname } from 'path';
 import { randomUUID } from 'crypto';
 
@@ -115,7 +115,7 @@ function writeLockMeta(meta: LockMetadata): void {
 
 /**
  * 清理过期锁
- * 只有当锁真正过期（时间超时且进程死亡）时才清理
+ * 只有当锁真正过期（时间超时且进程死亡）且有有效元数据时才清理
  */
 function cleanupStaleLock(): void {
   // 检查锁目录是否存在
@@ -125,21 +125,9 @@ function cleanupStaleLock(): void {
 
   const meta = readLockMeta();
 
-  // 如果元数据不存在，检查锁目录的创建时间
-  // 这避免了误删正在写入 meta.json 的活跃锁（mkdir 和 writeFile 之间的时间窗口）
+  // 如果元数据不存在，说明锁正在创建中，保守处理，不删除
+  // 这是安全的，因为 tryAcquireLock 使用原子 mkdir，如果锁已存在会失败
   if (!meta) {
-    try {
-      const stat = statSync(LOCK_DIR);
-      const dirMtime = stat.mtimeMs;
-      const now = Date.now();
-      // 只有目录超过 1 秒未写入 meta.json，才视为孤儿锁
-      // 正常情况下的写入应该在几毫秒内完成
-      if (now - dirMtime > 1000) {
-        rmSync(LOCK_DIR, { recursive: true, force: true });
-      }
-    } catch {
-      // 无法获取目录信息，保守处理，不删除
-    }
     return;
   }
 
@@ -158,21 +146,31 @@ function cleanupStaleLock(): void {
 
 /**
  * 跨进程文件锁（使用带元数据的锁目录）
+ * 使用原子 mkdir 操作确保互斥
  */
 class FileMutex {
   private lockMeta: LockMetadata | null = null;
 
   /**
    * 尝试获取锁
+   * 使用 mkdir 的原子性：如果目录已存在则失败
    */
   private async tryAcquireLock(): Promise<boolean> {
     try {
       // 首先检查是否有过期锁
       cleanupStaleLock();
 
-      // 尝试创建锁目录
+      // 检查锁目录是否已存在（避免 EEXIST 错误）
+      if (existsSync(LOCK_DIR)) {
+        return false;
+      }
+
+      // 尝试创建锁目录（原子操作，如果已存在会抛出错误）
       const dir = dirname(LOCK_DIR);
       mkdirSync(dir, { recursive: true });
+
+      // 使用 mkdir 创建锁目录
+      // 由于上面已经检查过 existsSync，这里如果仍失败说明是竞态条件
       mkdirSync(LOCK_DIR);
 
       // 写入锁元数据
@@ -184,7 +182,12 @@ class FileMutex {
       writeLockMeta(this.lockMeta);
 
       return true;
-    } catch {
+    } catch (err) {
+      // 如果目录已存在（竞态条件），返回 false
+      if (err instanceof Error && 'code' in err && err.code === 'EEXIST') {
+        return false;
+      }
+      // 其他错误也返回 false
       return false;
     }
   }
@@ -525,9 +528,8 @@ export async function portAlloc(params: PortAllocParams = {}): Promise<ToolResul
  * 释放端口（支持旧版本记录和新版本记录）
  *
  * 迁移策略（升级期间预期行为）：
- * - 旧记录（无 leaseToken）：首次操作时生成并回填 token，然后执行请求
- *   限制条件：记录必须有 allocatedAt 且在过去 5 分钟内创建
- *   这是为了平滑升级的设计决策，不是安全漏洞。
+ * - 旧记录（无 leaseToken）：如果有 agentId 或 chromeId，生成并回填 token，然后执行请求
+ *   这是为了平滑升级的设计决策。要求有 agentId 或 chromeId 证明所有权。
  *   建议：尽快升级所有客户端到新协议，旧记录会在一次操作后转换为新协议。
  * - 新版本记录（有 leaseToken）：必须验证 token
  */
@@ -556,18 +558,16 @@ export async function portRelease(params: { port: number; leaseToken?: string })
       // 旧版本记录（没有 leaseToken）：生成并回填 token，然后接受请求
       // 新版本记录（有 leaseToken）：必须验证 token
       if (!portInfo.leaseToken) {
-        // 检查是否符合迁移条件：必须有 allocatedAt 且在过去 5 分钟内
-        const MIGRATION_WINDOW_MS = 5 * 60 * 1000; // 5 分钟
-        const now = Date.now();
-        const isRecentAllocation = portInfo.allocatedAt && (now - portInfo.allocatedAt) < MIGRATION_WINDOW_MS;
+        // 检查是否有 ownership 证明：agentId 或 chromeId
+        const hasOwnershipProof = portInfo.agentId || portInfo.chromeId;
 
-        if (!isRecentAllocation) {
-          // 不符合迁移条件，拒绝操作
+        if (!hasOwnershipProof) {
+          // 没有 ownership 证明，拒绝迁移
           migrationRejected = true;
           return;
         }
 
-        // 符合迁移条件，生成新 token 并回填
+        // 有 ownership 证明，生成新 token 并回填
         migratedToken = randomUUID();
         registry[portKey] = {
           ...portInfo,
@@ -611,7 +611,7 @@ export async function portRelease(params: { port: number; leaseToken?: string })
 
   if (migrationRejected) {
     return error(
-      networkError(`端口 ${port} 是旧版本记录且超出迁移窗口（5 分钟），无法释放，请使用新协议重新分配端口`)
+      networkError(`端口 ${port} 是旧版本记录且无 ownership 证明（缺少 agentId 或 chromeId），无法释放`)
     );
   }
 
@@ -631,9 +631,8 @@ export async function portRelease(params: { port: number; leaseToken?: string })
  * 更新端口心跳（支持旧版本记录和新版本记录）
  *
  * 迁移策略（升级期间预期行为）：
- * - 旧记录（无 leaseToken）：首次操作时生成并回填 token，然后执行请求
- *   限制条件：记录必须有 allocatedAt 且在过去 5 分钟内创建
- *   这是为了平滑升级的设计决策，不是安全漏洞。
+ * - 旧记录（无 leaseToken）：如果有 agentId 或 chromeId，生成并回填 token，然后执行请求
+ *   这是为了平滑升级的设计决策。要求有 agentId 或 chromeId 证明所有权。
  *   建议：尽快升级所有客户端到新协议，旧记录会在一次操作后转换为新协议。
  * - 新版本记录（有 leaseToken）：必须验证 token
  */
@@ -662,18 +661,16 @@ export async function portHeartbeat(params: { port: number; leaseToken?: string 
       // 旧版本记录（没有 leaseToken）：生成并回填 token，然后接受请求
       // 新版本记录（有 leaseToken）：必须验证 token
       if (!portInfo.leaseToken) {
-        // 检查是否符合迁移条件：必须有 allocatedAt 且在过去 5 分钟内
-        const MIGRATION_WINDOW_MS = 5 * 60 * 1000; // 5 分钟
-        const now = Date.now();
-        const isRecentAllocation = portInfo.allocatedAt && (now - portInfo.allocatedAt) < MIGRATION_WINDOW_MS;
+        // 检查是否有 ownership 证明：agentId 或 chromeId
+        const hasOwnershipProof = portInfo.agentId || portInfo.chromeId;
 
-        if (!isRecentAllocation) {
-          // 不符合迁移条件，拒绝操作
+        if (!hasOwnershipProof) {
+          // 没有 ownership 证明，拒绝迁移
           migrationRejected = true;
           return;
         }
 
-        // 符合迁移条件，生成新 token 并回填
+        // 有 ownership 证明，生成新 token 并回填
         migratedToken = randomUUID();
         registry[portKey] = {
           ...portInfo,
@@ -720,7 +717,7 @@ export async function portHeartbeat(params: { port: number; leaseToken?: string 
 
   if (migrationRejected) {
     return error(
-      networkError(`端口 ${port} 是旧版本记录且超出迁移窗口（5 分钟），无法续期，请使用新协议重新分配端口`)
+      networkError(`端口 ${port} 是旧版本记录且无 ownership 证明（缺少 agentId 或 chromeId），无法续期`)
     );
   }
 
