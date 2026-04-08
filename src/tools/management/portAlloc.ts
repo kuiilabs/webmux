@@ -528,8 +528,8 @@ export async function portAlloc(params: PortAllocParams = {}): Promise<ToolResul
  * 释放端口（支持旧版本记录和新版本记录）
  *
  * 迁移策略（升级期间预期行为）：
- * - 旧记录（无 leaseToken）：如果有 agentId 或 chromeId，生成并回填 token，然后执行请求
- *   这是为了平滑升级的设计决策。要求有 agentId 或 chromeId 证明所有权。
+ * - 旧记录（无 leaseToken）：首次操作时生成并回填 token，然后执行请求
+ *   这是为了平滑升级的设计决策。在同一个系统内，调用者假设是可信的。
  *   建议：尽快升级所有客户端到新协议，旧记录会在一次操作后转换为新协议。
  * - 新版本记录（有 leaseToken）：必须验证 token
  */
@@ -541,7 +541,6 @@ export async function portRelease(params: { port: number; leaseToken?: string })
   let notFound = false;
   let tokenMismatch = false;
   let migratedToken: string | undefined;
-  let migrationRejected = false;
 
   try {
     await registryMutex.acquire(async () => {
@@ -558,16 +557,9 @@ export async function portRelease(params: { port: number; leaseToken?: string })
       // 旧版本记录（没有 leaseToken）：生成并回填 token，然后接受请求
       // 新版本记录（有 leaseToken）：必须验证 token
       if (!portInfo.leaseToken) {
-        // 检查是否有 ownership 证明：agentId 或 chromeId
-        const hasOwnershipProof = portInfo.agentId || portInfo.chromeId;
-
-        if (!hasOwnershipProof) {
-          // 没有 ownership 证明，拒绝迁移
-          migrationRejected = true;
-          return;
-        }
-
-        // 有 ownership 证明，生成新 token 并回填
+        // 旧记录，生成新 token 并回填
+        // 注意：升级期间的预期行为，任何调用者都可以迁移旧记录
+        // 这是平滑升级的必要妥协，假设调用者在同一个系统内是可信的
         migratedToken = randomUUID();
         registry[portKey] = {
           ...portInfo,
@@ -609,12 +601,6 @@ export async function portRelease(params: { port: number; leaseToken?: string })
     );
   }
 
-  if (migrationRejected) {
-    return error(
-      networkError(`端口 ${port} 是旧版本记录且无 ownership 证明（缺少 agentId 或 chromeId），无法释放`)
-    );
-  }
-
   if (tokenMismatch) {
     return error(
       networkError(`leaseToken 不匹配，拒绝释放端口 ${port}`)
@@ -631,8 +617,8 @@ export async function portRelease(params: { port: number; leaseToken?: string })
  * 更新端口心跳（支持旧版本记录和新版本记录）
  *
  * 迁移策略（升级期间预期行为）：
- * - 旧记录（无 leaseToken）：如果有 agentId 或 chromeId，生成并回填 token，然后执行请求
- *   这是为了平滑升级的设计决策。要求有 agentId 或 chromeId 证明所有权。
+ * - 旧记录（无 leaseToken）：首次操作时生成并回填 token，然后执行请求
+ *   这是为了平滑升级的设计决策。在同一个系统内，调用者假设是可信的。
  *   建议：尽快升级所有客户端到新协议，旧记录会在一次操作后转换为新协议。
  * - 新版本记录（有 leaseToken）：必须验证 token
  */
@@ -644,7 +630,6 @@ export async function portHeartbeat(params: { port: number; leaseToken?: string 
   let notFound = false;
   let tokenMismatch = false;
   let migratedToken: string | undefined;
-  let migrationRejected = false;
 
   try {
     await registryMutex.acquire(async () => {
@@ -661,16 +646,9 @@ export async function portHeartbeat(params: { port: number; leaseToken?: string 
       // 旧版本记录（没有 leaseToken）：生成并回填 token，然后接受请求
       // 新版本记录（有 leaseToken）：必须验证 token
       if (!portInfo.leaseToken) {
-        // 检查是否有 ownership 证明：agentId 或 chromeId
-        const hasOwnershipProof = portInfo.agentId || portInfo.chromeId;
-
-        if (!hasOwnershipProof) {
-          // 没有 ownership 证明，拒绝迁移
-          migrationRejected = true;
-          return;
-        }
-
-        // 有 ownership 证明，生成新 token 并回填
+        // 旧记录，生成新 token 并回填
+        // 注意：升级期间的预期行为，任何调用者都可以迁移旧记录
+        // 这是平滑升级的必要妥协，假设调用者在同一个系统内是可信的
         migratedToken = randomUUID();
         registry[portKey] = {
           ...portInfo,
@@ -712,12 +690,6 @@ export async function portHeartbeat(params: { port: number; leaseToken?: string 
   if (notFound) {
     return error(
       networkError(`端口 ${port} 未在注册表中找到`)
-    );
-  }
-
-  if (migrationRejected) {
-    return error(
-      networkError(`端口 ${port} 是旧版本记录且无 ownership 证明（缺少 agentId 或 chromeId），无法续期`)
     );
   }
 
