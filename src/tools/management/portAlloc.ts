@@ -115,7 +115,7 @@ function writeLockMeta(meta: LockMetadata): void {
 
 /**
  * 清理过期锁
- * 如果锁目录存在但元数据不存在，需要检查目录年龄以避免误删正在创建中的锁
+ * 只有当锁真正过期（时间超时且进程死亡）时才清理
  */
 function cleanupStaleLock(): void {
   // 检查锁目录是否存在
@@ -147,8 +147,9 @@ function cleanupStaleLock(): void {
   const isExpired = (now - meta.timestamp) > LOCK_TIMEOUT_MS;
   const isDeadProcess = !isProcessAlive(meta.pid);
 
-  if (isExpired || isDeadProcess) {
-    // 锁已过期或进程已死亡，清理
+  // 只有锁过期且进程死亡，才清理
+  // 如果进程仍存活，即使锁超时也不清理（可能是慢操作）
+  if (isExpired && isDeadProcess) {
     try {
       rmSync(LOCK_DIR, { recursive: true, force: true });
     } catch {}
@@ -190,13 +191,27 @@ class FileMutex {
 
   /**
    * 释放锁
+   * 只有在持有锁且 UUID 匹配时才删除锁目录
    */
   private releaseLock(): void {
+    if (!this.lockMeta) {
+      return; // 未持有锁
+    }
+
     try {
-      rmSync(LOCK_DIR, { recursive: true, force: true });
-      this.lockMeta = null;
+      // 验证锁目录仍存在且 UUID 匹配
+      if (existsSync(LOCK_DIR)) {
+        const currentMeta = readLockMeta();
+        if (currentMeta && currentMeta.uuid === this.lockMeta.uuid) {
+          // UUID 匹配，安全删除
+          rmSync(LOCK_DIR, { recursive: true, force: true });
+        }
+        // 如果 UUID 不匹配，说明锁已被其他进程获取，不删除
+      }
     } catch {
       // 忽略释放错误
+    } finally {
+      this.lockMeta = null;
     }
   }
 
@@ -363,6 +378,8 @@ async function updateRegistryFromProbe(
 }> {
   const allocatedPorts: number[] = [];
   const leaseTokens: Record<number, string> = {};
+  const now = Date.now();
+  const HEARTBEAT_TIMEOUT = 30000;
 
   // 更新过期但仍占用的端口心跳
   for (const portKey of probeResult.staleOccupied) {
@@ -374,9 +391,20 @@ async function updateRegistryFromProbe(
     }
   }
 
-  // 删除过期且空闲的端口
+  // 二次验证：删除过期且空闲的端口
+  // 在删除前重新验证心跳仍超时，避免删除收到心跳的活跃租约
   for (const portKey of probeResult.staleFree) {
-    delete registry[portKey];
+    const portInfo = registry[portKey];
+    // 重新验证：记录仍存在且心跳仍超时
+    if (portInfo && (!portInfo.lastHeartbeat || now - portInfo.lastHeartbeat > HEARTBEAT_TIMEOUT)) {
+      // 二次验证：端口确实未占用
+      const port = parseInt(portKey, 10);
+      const isOccupied = await checkPort(port);
+      if (!isOccupied) {
+        delete registry[portKey];
+      }
+    }
+    // 如果心跳已更新（now - lastHeartbeat <= TIMEOUT），保留记录
   }
 
   // 二次验证：释放心跳超时且实际未占用的端口
@@ -388,7 +416,7 @@ async function updateRegistryFromProbe(
     if (!portInfo || !portInfo.allocated) {
       continue; // 已被其他调用者修改
     }
-    if (!portInfo.lastHeartbeat || Date.now() - portInfo.lastHeartbeat > 30000) {
+    if (!portInfo.lastHeartbeat || now - portInfo.lastHeartbeat > HEARTBEAT_TIMEOUT) {
       // 心跳仍超时，二次验证端口是否被占用
       const isOccupied = await checkPort(port);
       if (!isOccupied) {
@@ -498,7 +526,7 @@ export async function portAlloc(params: PortAllocParams = {}): Promise<ToolResul
  *
  * 迁移策略（升级期间预期行为）：
  * - 旧记录（无 leaseToken）：首次操作时生成并回填 token，然后执行请求
- *   注意：这意味着在升级期间，任何知道端口号的调用者都可以迁移旧记录。
+ *   限制条件：记录必须有 allocatedAt 且在过去 5 分钟内创建
  *   这是为了平滑升级的设计决策，不是安全漏洞。
  *   建议：尽快升级所有客户端到新协议，旧记录会在一次操作后转换为新协议。
  * - 新版本记录（有 leaseToken）：必须验证 token
@@ -511,6 +539,7 @@ export async function portRelease(params: { port: number; leaseToken?: string })
   let notFound = false;
   let tokenMismatch = false;
   let migratedToken: string | undefined;
+  let migrationRejected = false;
 
   try {
     await registryMutex.acquire(async () => {
@@ -527,8 +556,18 @@ export async function portRelease(params: { port: number; leaseToken?: string })
       // 旧版本记录（没有 leaseToken）：生成并回填 token，然后接受请求
       // 新版本记录（有 leaseToken）：必须验证 token
       if (!portInfo.leaseToken) {
-        // 旧记录，生成新 token 并回填
-        // 注意：升级期间的预期行为，任何调用者都可以迁移旧记录
+        // 检查是否符合迁移条件：必须有 allocatedAt 且在过去 5 分钟内
+        const MIGRATION_WINDOW_MS = 5 * 60 * 1000; // 5 分钟
+        const now = Date.now();
+        const isRecentAllocation = portInfo.allocatedAt && (now - portInfo.allocatedAt) < MIGRATION_WINDOW_MS;
+
+        if (!isRecentAllocation) {
+          // 不符合迁移条件，拒绝操作
+          migrationRejected = true;
+          return;
+        }
+
+        // 符合迁移条件，生成新 token 并回填
         migratedToken = randomUUID();
         registry[portKey] = {
           ...portInfo,
@@ -570,6 +609,12 @@ export async function portRelease(params: { port: number; leaseToken?: string })
     );
   }
 
+  if (migrationRejected) {
+    return error(
+      networkError(`端口 ${port} 是旧版本记录且超出迁移窗口（5 分钟），无法释放，请使用新协议重新分配端口`)
+    );
+  }
+
   if (tokenMismatch) {
     return error(
       networkError(`leaseToken 不匹配，拒绝释放端口 ${port}`)
@@ -587,7 +632,7 @@ export async function portRelease(params: { port: number; leaseToken?: string })
  *
  * 迁移策略（升级期间预期行为）：
  * - 旧记录（无 leaseToken）：首次操作时生成并回填 token，然后执行请求
- *   注意：这意味着在升级期间，任何知道端口号的调用者都可以迁移旧记录。
+ *   限制条件：记录必须有 allocatedAt 且在过去 5 分钟内创建
  *   这是为了平滑升级的设计决策，不是安全漏洞。
  *   建议：尽快升级所有客户端到新协议，旧记录会在一次操作后转换为新协议。
  * - 新版本记录（有 leaseToken）：必须验证 token
@@ -600,6 +645,7 @@ export async function portHeartbeat(params: { port: number; leaseToken?: string 
   let notFound = false;
   let tokenMismatch = false;
   let migratedToken: string | undefined;
+  let migrationRejected = false;
 
   try {
     await registryMutex.acquire(async () => {
@@ -616,8 +662,18 @@ export async function portHeartbeat(params: { port: number; leaseToken?: string 
       // 旧版本记录（没有 leaseToken）：生成并回填 token，然后接受请求
       // 新版本记录（有 leaseToken）：必须验证 token
       if (!portInfo.leaseToken) {
-        // 旧记录，生成新 token 并回填
-        // 注意：升级期间的预期行为，任何调用者都可以迁移旧记录
+        // 检查是否符合迁移条件：必须有 allocatedAt 且在过去 5 分钟内
+        const MIGRATION_WINDOW_MS = 5 * 60 * 1000; // 5 分钟
+        const now = Date.now();
+        const isRecentAllocation = portInfo.allocatedAt && (now - portInfo.allocatedAt) < MIGRATION_WINDOW_MS;
+
+        if (!isRecentAllocation) {
+          // 不符合迁移条件，拒绝操作
+          migrationRejected = true;
+          return;
+        }
+
+        // 符合迁移条件，生成新 token 并回填
         migratedToken = randomUUID();
         registry[portKey] = {
           ...portInfo,
@@ -659,6 +715,12 @@ export async function portHeartbeat(params: { port: number; leaseToken?: string 
   if (notFound) {
     return error(
       networkError(`端口 ${port} 未在注册表中找到`)
+    );
+  }
+
+  if (migrationRejected) {
+    return error(
+      networkError(`端口 ${port} 是旧版本记录且超出迁移窗口（5 分钟），无法续期，请使用新协议重新分配端口`)
     );
   }
 
