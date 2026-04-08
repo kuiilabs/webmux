@@ -29,6 +29,12 @@ interface PortInfo {
   lastHeartbeat?: number;
 }
 
+interface PortHeartbeatResult {
+  port: number;
+  ok: boolean;
+  leaseToken?: string;
+}
+
 interface LockMetadata {
   pid: number;
   timestamp: number;
@@ -258,74 +264,128 @@ function writeRegistryAtomic(registry: Record<string, PortInfo>, tempFile: strin
 }
 
 /**
- * 在锁下执行清理和分配
- * 所有状态检查和写入都在同一锁持有期间完成，避免竞态
+ * 在锁外探测端口状态
+ * 返回探测结果供锁内更新使用
  */
-async function performAllocation(
+async function probePortStatus(
   registry: Record<string, PortInfo>,
   count: number
 ): Promise<{
-  registry: Record<string, PortInfo>;
-  allocatedPorts: number[];
-  leaseTokens: Record<number, string>;
+  staleOccupied: string[];
+  staleFree: string[];
+  freePorts: number[];
+  occupiedPorts: string[];
 }> {
   const now = Date.now();
   const HEARTBEAT_TIMEOUT = 30000;
-  const allocatedPorts: number[] = [];
-  const leaseTokens: Record<number, string> = {};
+  const staleOccupied: string[] = [];
+  const staleFree: string[] = [];
+  const freePorts: number[] = [];
+  const occupiedPorts: string[] = [];
 
-  // 步骤 1: 清理过期端口（在锁下实时检查）
+  // 检查过期端口
   for (const [portKey, info] of Object.entries(registry)) {
     const port = parseInt(portKey, 10);
     if (!info.lastHeartbeat || now - info.lastHeartbeat > HEARTBEAT_TIMEOUT) {
-      // 端口已过期，实时检查是否真的被占用
       const isOccupied = await checkPort(port);
       if (isOccupied) {
-        // 端口仍被占用，保留并刷新心跳
-        registry[portKey] = {
-          ...info,
-          lastHeartbeat: now,
-        };
+        staleOccupied.push(portKey);
       } else {
-        // 端口未被占用，删除
-        delete registry[portKey];
+        staleFree.push(portKey);
       }
     }
   }
 
-  // 步骤 2: 分配新端口（包括实时检查已分配端口）
-  for (let port = CDP_PROXY.PORT_RANGE_START; port <= CDP_PROXY.PORT_RANGE_END && allocatedPorts.length < count; port++) {
+  // 扫描可用端口
+  for (let port = CDP_PROXY.PORT_RANGE_START; port <= CDP_PROXY.PORT_RANGE_END && freePorts.length < count; port++) {
     const portKey = port.toString();
     const portInfo = registry[portKey];
 
-    // 检查端口是否已分配
     if (portInfo?.allocated) {
-      // 实时检查端口是否仍被占用（检测崩溃的持有者）
+      // 实时检查已分配端口是否仍被占用（检测崩溃的持有者）
       const isOccupied = await checkPort(port);
       if (isOccupied) {
-        continue; // 端口仍被占用，跳过
+        occupiedPorts.push(portKey);
       }
-      // 端口已分配但实际未被占用，释放它
-      delete registry[portKey];
+      // 未占用的已分配端口将在锁内被释放
+    } else {
+      // 未分配的端口，检查是否可用
+      const isOccupied = await checkPort(port);
+      if (!isOccupied) {
+        freePorts.push(port);
+      }
     }
+  }
 
-    // 实时检查端口是否被占用
-    const isOccupied = await checkPort(port);
-    if (!isOccupied) {
-      const leaseToken = randomUUID();
-      allocatedPorts.push(port);
-      leaseTokens[port] = leaseToken;
+  return { staleOccupied, staleFree, freePorts, occupiedPorts };
+}
+
+/**
+ * 在锁下执行注册表更新
+ * 基于锁外探测结果进行原子更新
+ */
+function updateRegistryFromProbe(
+  registry: Record<string, PortInfo>,
+  probeResult: {
+    staleOccupied: string[];
+    staleFree: string[];
+    freePorts: number[];
+    occupiedPorts: string[];
+  },
+  count: number
+): {
+  allocatedPorts: number[];
+  leaseTokens: Record<number, string>;
+} {
+  const allocatedPorts: number[] = [];
+  const leaseTokens: Record<number, string> = {};
+
+  // 更新过期但仍占用的端口心跳
+  for (const portKey of probeResult.staleOccupied) {
+    if (registry[portKey]) {
       registry[portKey] = {
-        port,
-        allocated: true,
-        allocatedAt: Date.now(),
-        leaseToken,
+        ...registry[portKey],
         lastHeartbeat: Date.now(),
       };
     }
   }
 
-  return { registry, allocatedPorts, leaseTokens };
+  // 删除过期且空闲的端口
+  for (const portKey of probeResult.staleFree) {
+    delete registry[portKey];
+  }
+
+  // 释放已分配但实际未占用的端口
+  for (const portKey of Object.keys(registry)) {
+    const portInfo = registry[portKey];
+    if (portInfo?.allocated && !probeResult.occupiedPorts.includes(portKey)) {
+      delete registry[portKey];
+    }
+  }
+
+  // 分配新端口
+  for (const port of probeResult.freePorts) {
+    if (allocatedPorts.length >= count) break;
+
+    const portKey = port.toString();
+    // 双重检查端口未被其他调用者分配
+    if (registry[portKey]?.allocated) {
+      continue;
+    }
+
+    const leaseToken = randomUUID();
+    allocatedPorts.push(port);
+    leaseTokens[port] = leaseToken;
+    registry[portKey] = {
+      port,
+      allocated: true,
+      allocatedAt: Date.now(),
+      leaseToken,
+      lastHeartbeat: Date.now(),
+    };
+  }
+
+  return { allocatedPorts, leaseTokens };
 }
 
 export async function portAlloc(params: PortAllocParams = {}): Promise<ToolResult<PortAllocResult>> {
@@ -336,12 +396,19 @@ export async function portAlloc(params: PortAllocParams = {}): Promise<ToolResul
   let leaseTokens: Record<number, string> = {};
 
   try {
+    // 步骤 1: 在锁外读取注册表并探测端口状态
+    let registry = await registryMutex.acquire(() => readRegistry());
+    const probeResult = await probePortStatus(registry, count);
+
+    // 步骤 2: 在锁内更新注册表
     await registryMutex.acquire(async () => {
-      const registry = readRegistry();
-      const result = await performAllocation(registry, count);
+      // 重新读取最新状态
+      registry = readRegistry();
+      // 基于探测结果更新
+      const result = updateRegistryFromProbe(registry, probeResult, count);
       allocatedPorts = result.allocatedPorts;
       leaseTokens = result.leaseTokens;
-      writeRegistryAtomic(result.registry, tempFile);
+      writeRegistryAtomic(registry, tempFile);
     });
   } catch (err) {
     // 清理临时文件
@@ -451,15 +518,16 @@ export async function portRelease(params: { port: number; leaseToken?: string })
 
 /**
  * 更新端口心跳（支持旧版本记录和新版本记录）
- * 对于没有 leaseToken 的记录，接受无 token 请求
+ * 对于没有 leaseToken 的记录，接受无 token 请求并返回生成的 token
  */
-export async function portHeartbeat(params: { port: number; leaseToken?: string }): Promise<ToolResult<{ port: number; ok: boolean }>> {
+export async function portHeartbeat(params: { port: number; leaseToken?: string }): Promise<ToolResult<PortHeartbeatResult>> {
   const { port, leaseToken } = params;
   const tempFile = `${PORT_REGISTRY_FILE}.${randomUUID()}.tmp`;
 
   let ok = false;
   let notFound = false;
   let tokenMismatch = false;
+  let generatedToken: string | undefined;
 
   try {
     await registryMutex.acquire(async () => {
@@ -476,6 +544,7 @@ export async function portHeartbeat(params: { port: number; leaseToken?: string 
       // 向后兼容：如果记录没有 leaseToken，接受无 token 请求并生成 token
       if (!portInfo.leaseToken) {
         const newToken = randomUUID();
+        generatedToken = newToken;
         registry[portKey] = {
           ...portInfo,
           leaseToken: newToken,
@@ -527,7 +596,13 @@ export async function portHeartbeat(params: { port: number; leaseToken?: string 
   }
 
   return success(
-    { port, ok },
-    `已更新端口 ${port} 的心跳`
+    {
+      port,
+      ok,
+      leaseToken: generatedToken,
+    },
+    generatedToken
+      ? `已更新端口 ${port} 的心跳（leaseToken 已生成，请妥善保管：${generatedToken}）`
+      : `已更新端口 ${port} 的心跳`
   );
 }
