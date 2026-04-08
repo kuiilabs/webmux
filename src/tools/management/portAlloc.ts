@@ -6,7 +6,7 @@
 import { success, error, networkError } from '../../shared/result.js';
 import type { ToolResult } from '../../shared/types.js';
 import { CDP_PROXY } from '../../shared/constants.js';
-import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, unlinkSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, unlinkSync, rmSync } from 'fs';
 import { join, dirname } from 'path';
 import { randomUUID } from 'crypto';
 
@@ -88,12 +88,7 @@ class FileMutex {
     if (this.held) {
       try {
         // 删除锁目录
-        const dir = dirname(this.lockFile);
-        const files = require('fs').readdirSync(dir);
-        // 只有锁目录为空时才删除
-        if (files.length === 0 || files.includes(this.lockFile.substring(this.lockFile.lastIndexOf('/') + 1))) {
-          require('fs').rmSync(this.lockFile, { recursive: true, force: true });
-        }
+        rmSync(this.lockFile, { recursive: true, force: true });
       } catch {
         // 忽略释放错误
       }
@@ -376,7 +371,7 @@ export async function portRelease(params: { port: number; leaseToken?: string })
 
 /**
  * 更新端口心跳（支持旧版本记录迁移）
- * 对于没有 leaseToken 的旧记录，接受无 token 请求并在写入时生成 token
+ * 对于没有 leaseToken 的旧记录，始终接受无 token 请求
  */
 export async function portHeartbeat(params: { port: number; leaseToken?: string }): Promise<ToolResult<{ port: number; ok: boolean }>> {
   const { port, leaseToken } = params;
@@ -398,9 +393,10 @@ export async function portHeartbeat(params: { port: number; leaseToken?: string 
 
       const portInfo = registry[portKey];
 
-      // 迁移：如果记录没有 leaseToken，接受请求并生成 token
-      if (portInfo.allocated && !portInfo.leaseToken) {
-        // 旧记录，接受无 token 请求，生成 token
+      // 迁移：如果记录没有 leaseToken，生成 token 但保持接受无 token 请求
+      // 这样旧调用者可以继续心跳，同时新调用者可以使用 token
+      if (!portInfo.leaseToken) {
+        // 旧记录，生成 token 并保存
         const newToken = randomUUID();
         registry[portKey] = {
           ...portInfo,
@@ -412,7 +408,7 @@ export async function portHeartbeat(params: { port: number; leaseToken?: string 
         return;
       }
 
-      // 新记录，必须验证 lease token
+      // 有 leaseToken 的记录，必须验证
       if (!leaseToken) {
         tokenMismatch = true;
         return;
