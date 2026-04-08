@@ -364,7 +364,7 @@ async function probePortStatus(
 /**
  * 在锁下执行注册表更新
  * 基于锁外探测结果进行原子更新
- * 在锁内对候选端口进行二次验证，确保状态未变化
+ * 注意：探测结果有过期风险，但为了减少锁持有时间，不在锁内二次探测
  */
 async function updateRegistryFromProbe(
   registry: Record<string, PortInfo>,
@@ -394,56 +394,38 @@ async function updateRegistryFromProbe(
     }
   }
 
-  // 二次验证：删除过期且空闲的端口
-  // 在删除前重新验证心跳仍超时，避免删除收到心跳的活跃租约
+  // 删除过期且空闲的端口
+  // 注意：这里不进行二次探测，以减小锁持有时间
+  // 依赖锁外探测结果的新鲜度
   for (const portKey of probeResult.staleFree) {
+    // 重新验证：记录仍存在且心跳仍超时（基于时间戳比较，不涉及网络）
     const portInfo = registry[portKey];
-    // 重新验证：记录仍存在且心跳仍超时
     if (portInfo && (!portInfo.lastHeartbeat || now - portInfo.lastHeartbeat > HEARTBEAT_TIMEOUT)) {
-      // 二次验证：端口确实未占用
-      const port = parseInt(portKey, 10);
-      const isOccupied = await checkPort(port);
-      if (!isOccupied) {
-        delete registry[portKey];
-      }
+      delete registry[portKey];
     }
-    // 如果心跳已更新（now - lastHeartbeat <= TIMEOUT），保留记录
   }
 
-  // 二次验证：释放心跳超时且实际未占用的端口
+  // 释放心跳超时且锁外探测确认未占用的端口
+  // 注意：这里不进行二次探测，以减小锁持有时间
   for (const portKey of probeResult.candidateStaleAllocatedPorts) {
-    const port = parseInt(portKey, 10);
     const portInfo = registry[portKey];
-
-    // 再次检查：端口记录是否仍存在且心跳仍超时
-    if (!portInfo || !portInfo.allocated) {
-      continue; // 已被其他调用者修改
-    }
-    if (!portInfo.lastHeartbeat || now - portInfo.lastHeartbeat > HEARTBEAT_TIMEOUT) {
-      // 心跳仍超时，二次验证端口是否被占用
-      const isOccupied = await checkPort(port);
-      if (!isOccupied) {
-        // 确认未占用，安全释放
-        delete registry[portKey];
-      }
+    // 重新验证：记录仍存在、心跳仍超时（基于时间戳比较）
+    if (portInfo && portInfo.allocated && (!portInfo.lastHeartbeat || now - portInfo.lastHeartbeat > HEARTBEAT_TIMEOUT)) {
+      // 锁外探测已确认未占用，安全释放
+      delete registry[portKey];
     }
   }
 
-  // 二次验证：分配候选可用端口
+  // 分配候选可用端口
+  // 注意：这里不进行二次探测，以减小锁持有时间
   for (const port of probeResult.candidateFreePorts) {
     if (allocatedPorts.length >= count) break;
 
     const portKey = port.toString();
 
-    // 二次检查：端口记录是否仍存在
+    // 二次检查：端口记录是否仍存在（基于内存状态，不涉及网络）
     if (registry[portKey]?.allocated) {
       continue; // 已被其他调用者分配
-    }
-
-    // 二次验证：端口是否仍可用
-    const isOccupied = await checkPort(port);
-    if (isOccupied) {
-      continue; // 端口已被占用，跳过
     }
 
     const leaseToken = randomUUID();
@@ -528,19 +510,18 @@ export async function portAlloc(params: PortAllocParams = {}): Promise<ToolResul
  * 释放端口（支持旧版本记录和新版本记录）
  *
  * 迁移策略（升级期间预期行为）：
- * - 旧记录（无 leaseToken）：首次操作时生成并回填 token，然后执行请求
- *   这是为了平滑升级的设计决策。在同一个系统内，调用者假设是可信的。
- *   建议：尽快升级所有客户端到新协议，旧记录会在一次操作后转换为新协议。
+ * - 旧记录（无 leaseToken）：始终接受无 token 请求，保持向后兼容
+ *   这是为了平滑升级的设计决策。旧记录永远不需要 token。
+ *   新分配的记录从一开始就有 leaseToken，需要 token 才能操作。
  * - 新版本记录（有 leaseToken）：必须验证 token
  */
-export async function portRelease(params: { port: number; leaseToken?: string }): Promise<ToolResult<{ port: number; released: boolean; migratedToken?: string }>> {
+export async function portRelease(params: { port: number; leaseToken?: string }): Promise<ToolResult<{ port: number; released: boolean }>> {
   const { port, leaseToken } = params;
   const tempFile = `${PORT_REGISTRY_FILE}.${randomUUID()}.tmp`;
 
   let released = false;
   let notFound = false;
   let tokenMismatch = false;
-  let migratedToken: string | undefined;
 
   try {
     await registryMutex.acquire(async () => {
@@ -554,19 +535,9 @@ export async function portRelease(params: { port: number; leaseToken?: string })
 
       const portInfo = registry[portKey];
 
-      // 旧版本记录（没有 leaseToken）：生成并回填 token，然后接受请求
+      // 旧版本记录（没有 leaseToken）：始终接受无 token 请求，保持向后兼容
       // 新版本记录（有 leaseToken）：必须验证 token
-      if (!portInfo.leaseToken) {
-        // 旧记录，生成新 token 并回填
-        // 注意：升级期间的预期行为，任何调用者都可以迁移旧记录
-        // 这是平滑升级的必要妥协，假设调用者在同一个系统内是可信的
-        migratedToken = randomUUID();
-        registry[portKey] = {
-          ...portInfo,
-          leaseToken: migratedToken,
-        };
-        // 继续执行释放操作
-      } else {
+      if (portInfo.leaseToken) {
         if (!leaseToken) {
           tokenMismatch = true;
           return;
@@ -576,6 +547,7 @@ export async function portRelease(params: { port: number; leaseToken?: string })
           return;
         }
       }
+      // 注意：旧记录没有 leaseToken，直接接受请求
 
       delete registry[portKey];
       released = true;
@@ -608,8 +580,8 @@ export async function portRelease(params: { port: number; leaseToken?: string })
   }
 
   return success(
-    { port, released, migratedToken },
-    `已释放端口 ${port}${migratedToken ? '（已迁移到新认证机制，本次返回的 leaseToken 为：' + migratedToken + '）' : ''}`
+    { port, released },
+    `已释放端口 ${port}`
   );
 }
 
@@ -617,19 +589,18 @@ export async function portRelease(params: { port: number; leaseToken?: string })
  * 更新端口心跳（支持旧版本记录和新版本记录）
  *
  * 迁移策略（升级期间预期行为）：
- * - 旧记录（无 leaseToken）：首次操作时生成并回填 token，然后执行请求
- *   这是为了平滑升级的设计决策。在同一个系统内，调用者假设是可信的。
- *   建议：尽快升级所有客户端到新协议，旧记录会在一次操作后转换为新协议。
+ * - 旧记录（无 leaseToken）：始终接受无 token 请求，保持向后兼容
+ *   这是为了平滑升级的设计决策。旧记录永远不需要 token。
+ *   新分配的记录从一开始就有 leaseToken，需要 token 才能操作。
  * - 新版本记录（有 leaseToken）：必须验证 token
  */
-export async function portHeartbeat(params: { port: number; leaseToken?: string }): Promise<ToolResult<PortHeartbeatResult & { migratedToken?: string }>> {
+export async function portHeartbeat(params: { port: number; leaseToken?: string }): Promise<ToolResult<PortHeartbeatResult>> {
   const { port, leaseToken } = params;
   const tempFile = `${PORT_REGISTRY_FILE}.${randomUUID()}.tmp`;
 
   let ok = false;
   let notFound = false;
   let tokenMismatch = false;
-  let migratedToken: string | undefined;
 
   try {
     await registryMutex.acquire(async () => {
@@ -643,19 +614,9 @@ export async function portHeartbeat(params: { port: number; leaseToken?: string 
 
       const portInfo = registry[portKey];
 
-      // 旧版本记录（没有 leaseToken）：生成并回填 token，然后接受请求
+      // 旧版本记录（没有 leaseToken）：始终接受无 token 请求，保持向后兼容
       // 新版本记录（有 leaseToken）：必须验证 token
-      if (!portInfo.leaseToken) {
-        // 旧记录，生成新 token 并回填
-        // 注意：升级期间的预期行为，任何调用者都可以迁移旧记录
-        // 这是平滑升级的必要妥协，假设调用者在同一个系统内是可信的
-        migratedToken = randomUUID();
-        registry[portKey] = {
-          ...portInfo,
-          leaseToken: migratedToken,
-        };
-        // 继续执行心跳更新
-      } else {
+      if (portInfo.leaseToken) {
         if (!leaseToken) {
           tokenMismatch = true;
           return;
@@ -665,10 +626,11 @@ export async function portHeartbeat(params: { port: number; leaseToken?: string 
           return;
         }
       }
+      // 注意：旧记录没有 leaseToken，直接接受请求
 
       // 更新心跳
       registry[portKey] = {
-        ...registry[portKey],
+        ...portInfo,
         lastHeartbeat: Date.now(),
       };
       ok = true;
@@ -700,7 +662,7 @@ export async function portHeartbeat(params: { port: number; leaseToken?: string 
   }
 
   return success(
-    { port, ok, migratedToken },
-    `已更新端口 ${port} 的心跳${migratedToken ? '（已迁移到新认证机制，本次返回的 leaseToken 为：' + migratedToken + '，请保存用于后续操作）' : ''}`
+    { port, ok },
+    `已更新端口 ${port} 的心跳`
   );
 }
