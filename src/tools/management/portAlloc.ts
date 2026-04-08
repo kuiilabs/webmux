@@ -1,12 +1,12 @@
 /**
  * port_alloc 工具 - 自动分配端口（9222-9299）
- * 使用临时文件 + 原子写入防止竞态条件
+ * 使用互斥锁和原子写入防止竞态条件
  */
 
 import { success, error, networkError } from '../../shared/result.js';
 import type { ToolResult } from '../../shared/types.js';
 import { CDP_PROXY } from '../../shared/constants.js';
-import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, unlinkSync, readdirSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, unlinkSync } from 'fs';
 import { join, dirname } from 'path';
 import { randomUUID } from 'crypto';
 
@@ -24,6 +24,7 @@ interface PortInfo {
   allocatedAt?: number;
   chromeId?: string;
   agentId?: string;
+  leaseToken?: string;
   lastHeartbeat?: number;
 }
 
@@ -63,72 +64,52 @@ function readRegistry(): Record<string, PortInfo> {
 
     const content = readFileSync(PORT_REGISTRY_FILE, 'utf-8');
     return JSON.parse(content);
-  } catch {
+  } catch (err) {
+    // 读取失败时返回空注册表，不抛出错误
     return {};
   }
 }
 
 /**
  * 原子写入注册表（使用临时文件 + rename 确保原子性）
+ * 失败时抛出错误
  */
-function writeRegistryAtomic(registry: Record<string, PortInfo>): boolean {
-  try {
-    const dir = dirname(PORT_REGISTRY_FILE);
-    mkdirSync(dir, { recursive: true });
+function writeRegistryAtomic(registry: Record<string, PortInfo>, tempFile: string): void {
+  writeFileSync(tempFile, JSON.stringify(registry, null, 2), 'utf-8');
+  renameSync(tempFile, PORT_REGISTRY_FILE);
+}
 
-    const tempFile = `${PORT_REGISTRY_FILE}.${randomUUID()}.tmp`;
-    writeFileSync(tempFile, JSON.stringify(registry, null, 2), 'utf-8');
-    renameSync(tempFile, PORT_REGISTRY_FILE);
-    return true;
-  } catch (err) {
-    // 清理临时文件
+/**
+ * 互斥锁实现 - 正确的序列化处理
+ */
+class Mutex {
+  private lock: Promise<void> = Promise.resolve();
+
+  async acquire<T>(fn: () => Promise<T>): Promise<T> {
+    // 捕获当前锁，在释放前创建新锁
+    const prevLock = this.lock;
+    let release: () => void;
+    this.lock = new Promise(resolve => {
+      release = resolve;
+    });
+
+    // 等待前一个锁释放
+    await prevLock;
+
     try {
-      const dir = dirname(PORT_REGISTRY_FILE);
-      const files = readdirSync(dir);
-      for (const f of files) {
-        if (f.endsWith('.tmp')) {
-          try {
-            unlinkSync(join(dir, f));
-          } catch {}
-        }
-      }
-    } catch {}
-    return false;
+      return await fn();
+    } finally {
+      release!();
+    }
   }
 }
 
-/**
- * 带锁的注册表操作（使用文件锁模拟）
- */
-let registryLock: Promise<void> = Promise.resolve();
+const registryMutex = new Mutex();
 
 /**
- * 互斥执行注册表操作
+ * 清理过期端口（心跳超时）- 返回全新对象
  */
-async function withRegistryLock<T>(fn: (registry: Record<string, PortInfo>) => Promise<T>): Promise<T> {
-  // 等待之前的锁释放
-  await registryLock;
-
-  // 创建新的锁
-  let releaseLock: () => void;
-  registryLock = new Promise(resolve => {
-    releaseLock = resolve;
-  });
-
-  try {
-    const registry = readRegistry();
-    const result = await fn(registry);
-    writeRegistryAtomic(registry);
-    return result;
-  } finally {
-    releaseLock!();
-  }
-}
-
-/**
- * 清理过期端口（心跳超时）- 异步版本
- */
-async function cleanupStalePortsSync(registry: Record<string, PortInfo>): Promise<Record<string, PortInfo>> {
+async function cleanupStalePorts(registry: Record<string, PortInfo>): Promise<Record<string, PortInfo>> {
   const now = Date.now();
   const HEARTBEAT_TIMEOUT = 30000; // 30 秒
 
@@ -142,7 +123,7 @@ async function cleanupStalePortsSync(registry: Record<string, PortInfo>): Promis
         // 端口仍被占用，保留并刷新心跳
         cleaned[portKey] = { ...info, lastHeartbeat: now };
       }
-      // 否则不保留（端口未被占用）
+      // 否则不保留（端口未被占用，从 cleaned 中排除）
     } else {
       cleaned[portKey] = info;
     }
@@ -154,43 +135,54 @@ export async function portAlloc(params: PortAllocParams = {}): Promise<ToolResul
   const { count = 1 } = params;
 
   const allocatedPorts: number[] = [];
+  const tempFile = `${PORT_REGISTRY_FILE}.${randomUUID()}.tmp`;
 
-  // 使用锁确保并发安全
-  await withRegistryLock(async (registry) => {
-    // 先清理过期端口
-    const cleanedRegistry = await cleanupStalePortsSync(registry);
+  try {
+    await registryMutex.acquire(async () => {
+      let registry = readRegistry();
 
-    // 扫描可用端口
-    for (let port = CDP_PROXY.PORT_RANGE_START; port <= CDP_PROXY.PORT_RANGE_END && allocatedPorts.length < count; port++) {
-      const portKey = port.toString();
-      const portInfo = cleanedRegistry[portKey];
+      // 先清理过期端口
+      registry = await cleanupStalePorts(registry);
 
-      // 检查端口是否已分配且仍在用
-      if (portInfo?.allocated) {
-        const isOccupied = await checkPort(port);
-        if (isOccupied) {
-          continue; // 端口仍被占用
+      // 扫描可用端口
+      for (let port = CDP_PROXY.PORT_RANGE_START; port <= CDP_PROXY.PORT_RANGE_END && allocatedPorts.length < count; port++) {
+        const portKey = port.toString();
+        const portInfo = registry[portKey];
+
+        // 检查端口是否已分配且仍在用
+        if (portInfo?.allocated) {
+          // 已有分配的端口，跳过（不允许重新分配）
+          continue;
         }
-        // 端口未被占用，释放
-        delete cleanedRegistry[portKey];
+
+        // 尝试分配
+        const isOccupied = await checkPort(port);
+        if (!isOccupied) {
+          allocatedPorts.push(port);
+          registry[portKey] = {
+            port,
+            allocated: true,
+            allocatedAt: Date.now(),
+            leaseToken: randomUUID(),
+            lastHeartbeat: Date.now(),
+          };
+        }
       }
 
-      // 尝试分配
-      const isOccupied = await checkPort(port);
-      if (!isOccupied) {
-        allocatedPorts.push(port);
-        cleanedRegistry[portKey] = {
-          port,
-          allocated: true,
-          allocatedAt: Date.now(),
-          lastHeartbeat: Date.now(),
-        };
-      }
-    }
+      // 原子写入注册表
+      writeRegistryAtomic(registry, tempFile);
+    });
+  } catch (err) {
+    // 清理临时文件
+    try {
+      unlinkSync(tempFile);
+    } catch {}
 
-    // 更新 registry 引用
-    Object.assign(registry, cleanedRegistry);
-  });
+    const message = err instanceof Error ? err.message : String(err);
+    return error(
+      networkError(`端口分配失败：${message}`)
+    );
+  }
 
   if (allocatedPorts.length === 0) {
     return error(
@@ -209,41 +201,127 @@ export async function portAlloc(params: PortAllocParams = {}): Promise<ToolResul
 /**
  * 释放端口
  */
-export async function portRelease(params: { port: number }): Promise<ToolResult<{ port: number; released: boolean }>> {
-  const { port } = params;
+export async function portRelease(params: { port: number; leaseToken?: string }): Promise<ToolResult<{ port: number; released: boolean }>> {
+  const { port, leaseToken } = params;
+  const tempFile = `${PORT_REGISTRY_FILE}.${randomUUID()}.tmp`;
 
   let released = false;
-  await withRegistryLock(async (registry) => {
-    const portKey = port.toString();
-    if (registry[portKey]) {
+  let notFound = false;
+
+  try {
+    await registryMutex.acquire(async () => {
+      const registry = readRegistry();
+      const portKey = port.toString();
+
+      if (!registry[portKey]) {
+        notFound = true;
+        return;
+      }
+
+      // 验证 lease token（如果提供）
+      if (leaseToken && registry[portKey].leaseToken && registry[portKey].leaseToken !== leaseToken) {
+        released = false;
+        return;
+      }
+
       delete registry[portKey];
       released = true;
-    }
-  });
+
+      // 原子写入注册表
+      writeRegistryAtomic(registry, tempFile);
+    });
+  } catch (err) {
+    // 清理临时文件
+    try {
+      unlinkSync(tempFile);
+    } catch {}
+
+    const message = err instanceof Error ? err.message : String(err);
+    return error(
+      networkError(`端口释放失败：${message}`)
+    );
+  }
+
+  if (notFound) {
+    return success(
+      { port, released: false },
+      `端口 ${port} 未在注册表中找到`
+    );
+  }
+
+  if (!released) {
+    return success(
+      { port, released: false },
+      ` leaseToken 不匹配，拒绝释放端口 ${port}`
+    );
+  }
 
   return success(
     { port, released },
-    released ? `已释放端口 ${port}` : `端口 ${port} 未在注册表中找到`
+    `已释放端口 ${port}`
   );
 }
 
 /**
  * 更新端口心跳
  */
-export async function portHeartbeat(params: { port: number }): Promise<ToolResult<{ port: number; ok: boolean }>> {
-  const { port } = params;
+export async function portHeartbeat(params: { port: number; leaseToken?: string }): Promise<ToolResult<{ port: number; ok: boolean }>> {
+  const { port, leaseToken } = params;
+  const tempFile = `${PORT_REGISTRY_FILE}.${randomUUID()}.tmp`;
 
   let ok = false;
-  await withRegistryLock(async (registry) => {
-    const portKey = port.toString();
-    if (registry[portKey]) {
+  let notFound = false;
+
+  try {
+    await registryMutex.acquire(async () => {
+      const registry = readRegistry();
+      const portKey = port.toString();
+
+      if (!registry[portKey]) {
+        notFound = true;
+        return;
+      }
+
+      // 验证 lease token（如果提供）
+      if (leaseToken && registry[portKey].leaseToken && registry[portKey].leaseToken !== leaseToken) {
+        ok = false;
+        return;
+      }
+
       registry[portKey].lastHeartbeat = Date.now();
       ok = true;
-    }
-  });
+
+      // 原子写入注册表
+      writeRegistryAtomic(registry, tempFile);
+    });
+  } catch (err) {
+    // 清理临时文件
+    try {
+      unlinkSync(tempFile);
+    } catch {}
+
+    const message = err instanceof Error ? err.message : String(err);
+    return error(
+      networkError(`端口心跳更新失败：${message}`)
+    );
+  }
+
+  if (notFound) {
+    return success(
+      { port, ok: false },
+      `端口 ${port} 未在注册表中找到`
+    );
+  }
+
+  if (!ok) {
+    return success(
+      { port, ok: false },
+      `leaseToken 不匹配，拒绝更新端口 ${port} 的心跳`
+    );
+  }
 
   return success(
     { port, ok },
-    ok ? `已更新端口 ${port} 的心跳` : `端口 ${port} 未在注册表中找到`
+    `已更新端口 ${port} 的心跳`
   );
 }
