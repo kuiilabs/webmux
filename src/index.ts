@@ -1,5 +1,7 @@
+#!/usr/bin/env node
 /**
  * webmux 入口
+ * @fileoverview 面向 AI Agent 的统一网络操作系统
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
