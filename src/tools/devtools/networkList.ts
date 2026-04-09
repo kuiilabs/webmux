@@ -4,7 +4,7 @@
 
 import { success, error, networkError } from '../../shared/result.js';
 import type { ToolResult } from '../../shared/types.js';
-import { CDP_PROXY } from '../../shared/constants.js';
+import { buildCdpProxyUrl } from '../../shared/cdpProxy.js';
 
 interface NetworkListParams {
   targetId: string;
@@ -30,7 +30,7 @@ export async function networkList(params: NetworkListParams): Promise<ToolResult
 
   try {
     // 获取网络请求列表
-    const url = `http://localhost:${CDP_PROXY.DEFAULT_PORT}/network?target=${targetId}`;
+    const url = buildCdpProxyUrl('/network', { target: targetId });
     const response = await fetch(url);
 
     if (!response.ok) {

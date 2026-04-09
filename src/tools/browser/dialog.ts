@@ -4,7 +4,7 @@
 
 import { success, error, pageError, networkError } from '../../shared/result.js';
 import type { ToolResult } from '../../shared/types.js';
-import { CDP_PROXY } from '../../shared/constants.js';
+import { buildCdpProxyUrl } from '../../shared/cdpProxy.js';
 
 interface BrowserDialogParams {
   targetId: string;
@@ -80,7 +80,7 @@ export async function browserDialog(params: BrowserDialogParams): Promise<ToolRe
     // 第一步：设置对话框处理器
     const handlerScript = DIALOG_HANDLER_SCRIPT(action, promptText);
     const handlerResponse = await fetch(
-      `http://localhost:${CDP_PROXY.DEFAULT_PORT}/eval?target=${targetId}`,
+      buildCdpProxyUrl('/eval', { target: targetId }),
       {
         method: 'POST',
         headers: {
@@ -104,7 +104,7 @@ export async function browserDialog(params: BrowserDialogParams): Promise<ToolRe
       const startTime = Date.now();
       while (Date.now() - startTime < timeout) {
         const checkResponse = await fetch(
-          `http://localhost:${CDP_PROXY.DEFAULT_PORT}/eval?target=${targetId}`,
+          buildCdpProxyUrl('/eval', { target: targetId }),
           {
             method: 'POST',
             headers: {

@@ -5,7 +5,8 @@
 
 import { success, error, pageError, networkError } from '../../shared/result.js';
 import type { ToolResult } from '../../shared/types.js';
-import { CDP_PROXY } from '../../shared/constants.js';
+import { buildCdpProxyUrl } from '../../shared/cdpProxy.js';
+import { SECURITY_LIMITS, ensureTextLength, serializeJsString } from '../../shared/security.js';
 
 interface BrowserClickParams {
   targetId: string;
@@ -26,7 +27,7 @@ interface ClickResult {
  */
 const JS_CLICK_SCRIPT = (selector: string) => `
 (function() {
-  const el = document.querySelector('${selector.replace(/'/g, "\\'")}');
+  const el = document.querySelector(${serializeJsString(selector)});
   if (!el) {
     return { found: false, error: '元素未找到' };
   }
@@ -53,7 +54,7 @@ const JS_CLICK_SCRIPT = (selector: string) => `
  */
 const MOUSE_CLICK_SCRIPT = (selector: string) => `
 (function() {
-  const el = document.querySelector('${selector.replace(/'/g, "\\'")}');
+  const el = document.querySelector(${serializeJsString(selector)});
   if (!el) {
     return { found: false, error: '元素未找到' };
   }
@@ -85,11 +86,13 @@ export async function browserClick(params: BrowserClickParams): Promise<ToolResu
   }
 
   try {
+    const validatedSelector = ensureTextLength('selector', selector, SECURITY_LIMITS.MAX_SELECTOR_LENGTH);
+
     if (mode === 'js') {
       // JS click 模式
-      const script = JS_CLICK_SCRIPT(selector);
+      const script = JS_CLICK_SCRIPT(validatedSelector);
       const response = await fetch(
-        `http://localhost:${CDP_PROXY.DEFAULT_PORT}/eval?target=${targetId}`,
+        buildCdpProxyUrl('/eval', { target: targetId }),
         {
           method: 'POST',
           headers: {
@@ -112,19 +115,19 @@ export async function browserClick(params: BrowserClickParams): Promise<ToolResu
       return success(
         {
           targetId,
-          selector,
+          selector: validatedSelector,
           mode: 'js',
           success: true,
-          message: `已通过 JS 点击 ${selector}`,
+          message: `已通过 JS 点击 ${validatedSelector}`,
         },
-        `已点击元素 ${selector}`
+        `已点击元素 ${validatedSelector}`
       );
     } else {
       // 真实鼠标模式
       // 第一步：获取元素位置
-      const script = MOUSE_CLICK_SCRIPT(selector);
+      const script = MOUSE_CLICK_SCRIPT(validatedSelector);
       const response = await fetch(
-        `http://localhost:${CDP_PROXY.DEFAULT_PORT}/eval?target=${targetId}`,
+        buildCdpProxyUrl('/eval', { target: targetId }),
         {
           method: 'POST',
           headers: {
@@ -150,13 +153,13 @@ export async function browserClick(params: BrowserClickParams): Promise<ToolResu
 
       // 第二步：调用 CDP 真实鼠标事件
       const clickAtResponse = await fetch(
-        `http://localhost:${CDP_PROXY.DEFAULT_PORT}/clickAt?target=${targetId}`,
+        buildCdpProxyUrl('/clickAt', { target: targetId }),
         {
           method: 'POST',
           headers: {
             'Content-Type': 'text/plain',
           },
-          body: selector,
+          body: validatedSelector,
         }
       );
 
@@ -167,12 +170,12 @@ export async function browserClick(params: BrowserClickParams): Promise<ToolResu
       return success(
         {
           targetId,
-          selector,
+          selector: validatedSelector,
           mode: 'mouse',
           success: true,
-          message: `已通过真实鼠标事件点击 ${selector}`,
+          message: `已通过真实鼠标事件点击 ${validatedSelector}`,
         },
-        `已点击元素 ${selector}（真实鼠标事件）`
+        `已点击元素 ${validatedSelector}（真实鼠标事件）`
       );
     }
   } catch (err) {

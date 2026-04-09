@@ -1,8 +1,8 @@
-# Web Agent Plugin - 实现完成总结
+# webmux - 实现完成总结
 
 ## 项目概述
 
-Web Agent Plugin 是一个以 Plugin 为交付形态的统一浏览器/联网执行框架，面向 Agent 提供网络操作系统能力。
+webmux 是一个以 Plugin 为交付形态的统一浏览器/联网执行框架，面向 Agent 提供网络操作系统能力。
 
 **GitHub**: (待创建)  
 **版本**: 0.1.0  
@@ -127,7 +127,7 @@ Web Agent Plugin 是一个以 Plugin 为交付形态的统一浏览器/联网执
 ## 项目目录结构
 
 ```
-web-agent-plugin/
+webmux/
 ├── README.md
 ├── WEB_AGENT_PLUGIN_PROJECT_PLAN_V1.md
 ├── IMPLEMENTATION_SUMMARY.md    # 本文档
@@ -234,7 +234,7 @@ web-agent-plugin/
 ### 安装
 ```bash
 # 克隆项目
-cd web-agent-plugin
+cd webmux
 
 # 安装依赖
 npm install

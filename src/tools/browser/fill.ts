@@ -4,7 +4,8 @@
 
 import { success, error, pageError, networkError } from '../../shared/result.js';
 import type { ToolResult } from '../../shared/types.js';
-import { CDP_PROXY } from '../../shared/constants.js';
+import { buildCdpProxyUrl } from '../../shared/cdpProxy.js';
+import { SECURITY_LIMITS, ensureTextLength, serializeJsString } from '../../shared/security.js';
 
 interface BrowserFillParams {
   targetId: string;
@@ -27,7 +28,7 @@ interface FillResult {
  */
 const FILL_SCRIPT = (selector: string, value: string, clear: boolean) => `
 (function() {
-  const el = document.querySelector('${selector.replace(/'/g, "\\'")}');
+  const el = document.querySelector(${serializeJsString(selector)});
   if (!el) {
     return { found: false, error: '元素未找到' };
   }
@@ -41,7 +42,7 @@ const FILL_SCRIPT = (selector: string, value: string, clear: boolean) => `
   }
 
   // 设置值
-  el.value = ${JSON.stringify(value)};
+  el.value = ${serializeJsString(value)};
 
   // 触发输入事件（让 React/Vue 等框架感知变化）
   const inputEvent = new Event('input', { bubbles: true });
@@ -59,7 +60,7 @@ const FILL_SCRIPT = (selector: string, value: string, clear: boolean) => `
  */
 const SUBMIT_SCRIPT = (selector: string) => `
 (function() {
-  const el = document.querySelector('${selector.replace(/'/g, "\\'")}');
+  const el = document.querySelector(${serializeJsString(selector)});
   if (!el) {
     return { found: false, error: '元素未找到' };
   }
@@ -98,10 +99,13 @@ export async function browserFill(params: BrowserFillParams): Promise<ToolResult
   }
 
   try {
+    const validatedSelector = ensureTextLength('selector', selector, SECURITY_LIMITS.MAX_SELECTOR_LENGTH);
+    const validatedValue = ensureTextLength('value', value, SECURITY_LIMITS.MAX_INPUT_VALUE_LENGTH);
+
     // 第一步：填写值
-    const fillScript = FILL_SCRIPT(selector, value, clear);
+    const fillScript = FILL_SCRIPT(validatedSelector, validatedValue, clear);
     const fillResponse = await fetch(
-      `http://localhost:${CDP_PROXY.DEFAULT_PORT}/eval?target=${targetId}`,
+      buildCdpProxyUrl('/eval', { target: targetId }),
       {
         method: 'POST',
         headers: {
@@ -124,9 +128,9 @@ export async function browserFill(params: BrowserFillParams): Promise<ToolResult
     // 第二步：提交表单（如果需要）
     let submitted = false;
     if (submit) {
-      const submitScript = SUBMIT_SCRIPT(selector);
+      const submitScript = SUBMIT_SCRIPT(validatedSelector);
       const submitResponse = await fetch(
-        `http://localhost:${CDP_PROXY.DEFAULT_PORT}/eval?target=${targetId}`,
+        buildCdpProxyUrl('/eval', { target: targetId }),
         {
           method: 'POST',
           headers: {
@@ -145,12 +149,12 @@ export async function browserFill(params: BrowserFillParams): Promise<ToolResult
     return success(
       {
         targetId,
-        selector,
-        value,
+        selector: validatedSelector,
+        value: validatedValue,
         filled: true,
         submitted,
       },
-      `已填写 ${selector}${submitted ? ' 并提交表单' : ''}`
+      `已填写 ${validatedSelector}${submitted ? ' 并提交表单' : ''}`
     );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

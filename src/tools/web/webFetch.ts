@@ -2,10 +2,16 @@
  * web_fetch 工具 - 静态网页抓取（支持 Jina、缓存、token 预估）
  */
 
-import { success, error, networkError } from '../../shared/result.js';
+import { success, error, networkError, pageError } from '../../shared/result.js';
 import type { ToolResult } from '../../shared/types.js';
 import { tokenBudget } from '../../runtime/tokenBudget.js';
 import { errorClassifier } from '../../runtime/errorClassifier.js';
+import {
+  SECURITY_LIMITS,
+  readResponseTextWithLimit,
+  trimOldestCacheEntries,
+  validateHttpUrl,
+} from '../../shared/security.js';
 
 interface WebFetchParams {
   url: string;
@@ -32,14 +38,22 @@ export async function webFetch(params: WebFetchParams): Promise<ToolResult<WebFe
     return error(networkError('缺少必要参数：url'));
   }
 
+  let validatedUrl: string;
+  try {
+    validatedUrl = validateHttpUrl(url);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return error(pageError(message));
+  }
+
   // 检查缓存
   if (useCache) {
-    const cached = cache.get(url);
+    const cached = cache.get(validatedUrl);
     if (cached && Date.now() - cached.timestamp < CACHE_TTL_MS) {
       const tokens = tokenBudget.estimate(cached.content);
       return success(
         {
-          url,
+          url: validatedUrl,
           content: cached.content,
           source: 'cache',
           tokens,
@@ -53,7 +67,7 @@ export async function webFetch(params: WebFetchParams): Promise<ToolResult<WebFe
   // 优先尝试 Jina
   if (useJina) {
     try {
-      const jinaUrl = `https://r.jina.ai/${url}`;
+      const jinaUrl = `https://r.jina.ai/${validatedUrl}`;
       const response = await fetch(jinaUrl, {
         headers: {
           'Accept': 'application/json',
@@ -62,7 +76,8 @@ export async function webFetch(params: WebFetchParams): Promise<ToolResult<WebFe
       });
 
       if (response.ok) {
-        const data = await response.json() as { content?: string; text?: string };
+        const payload = await readResponseTextWithLimit(response);
+        const data = JSON.parse(payload) as { content?: string; text?: string };
         const content = data.content || data.text || '';
 
         if (content) {
@@ -71,23 +86,26 @@ export async function webFetch(params: WebFetchParams): Promise<ToolResult<WebFe
           let finalContent = content;
           let truncated = false;
 
-          if (estimate.exceedsHardLimit) {
+          if (estimate.strategy === 'reject') {
+            return error(pageError('网页内容超过 token 上限，已拒绝返回'));
+          } else if (estimate.strategy === 'chunked') {
             const processed = await tokenBudget.process(content, 'chunked');
             finalContent = processed.chunks?.[0] || content;
             truncated = true;
-          } else if (estimate.exceedsSoftLimit) {
+          } else if (estimate.strategy === 'extract_main') {
             const processed = await tokenBudget.process(content, 'extract_main');
             finalContent = processed.text || content;
             truncated = processed.truncated;
           }
 
           // 写入缓存
-          cache.set(url, { content, timestamp: Date.now() });
+          cache.set(validatedUrl, { content, timestamp: Date.now() });
+          trimOldestCacheEntries(cache, SECURITY_LIMITS.MAX_CACHE_ENTRIES);
 
           const tokens = tokenBudget.estimate(finalContent);
           return success(
             {
-              url,
+              url: validatedUrl,
               content: finalContent,
               source: 'jina',
               tokens,
@@ -109,7 +127,7 @@ export async function webFetch(params: WebFetchParams): Promise<ToolResult<WebFe
 
   // 降级：原生 fetch
   try {
-    const response = await fetch(url, {
+    const response = await fetch(validatedUrl, {
       headers: {
         'Accept': 'text/html,application/xhtml+xml',
         'User-Agent': 'Mozilla/5.0 (compatible; WebAgent/1.0)',
@@ -117,11 +135,14 @@ export async function webFetch(params: WebFetchParams): Promise<ToolResult<WebFe
     });
 
     if (!response.ok) {
-      const toolError = errorClassifier.classify(new Error(`HTTP ${response.status}`));
+      const toolError = errorClassifier.classify({
+        status: response.status,
+        message: `HTTP ${response.status}`,
+      });
       return error(toolError);
     }
 
-    const html = await response.text();
+    const html = await readResponseTextWithLimit(response);
 
     // 简单提取正文（去除 script、style 等）
     const content = extractTextFromHtml(html);
@@ -130,23 +151,26 @@ export async function webFetch(params: WebFetchParams): Promise<ToolResult<WebFe
     let finalContent = content;
     let truncated = false;
 
-    if (estimate.exceedsHardLimit) {
+    if (estimate.strategy === 'reject') {
+      return error(pageError('网页内容超过 token 上限，已拒绝返回'));
+    } else if (estimate.strategy === 'chunked') {
       const processed = await tokenBudget.process(content, 'chunked');
       finalContent = processed.chunks?.[0] || content;
       truncated = true;
-    } else if (estimate.exceedsSoftLimit) {
+    } else if (estimate.strategy === 'extract_main') {
       const processed = await tokenBudget.process(content, 'extract_main');
       finalContent = processed.text || content;
       truncated = processed.truncated;
     }
 
     // 写入缓存
-    cache.set(url, { content, timestamp: Date.now() });
+    cache.set(validatedUrl, { content, timestamp: Date.now() });
+    trimOldestCacheEntries(cache, SECURITY_LIMITS.MAX_CACHE_ENTRIES);
 
     const tokens = tokenBudget.estimate(finalContent);
     return success(
       {
-        url,
+        url: validatedUrl,
         content: finalContent,
         source: 'fetch',
         tokens,

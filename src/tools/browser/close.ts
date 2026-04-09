@@ -4,7 +4,7 @@
 
 import { success, error, pageError, networkError } from '../../shared/result.js';
 import type { ToolResult } from '../../shared/types.js';
-import { CDP_PROXY } from '../../shared/constants.js';
+import { buildCdpProxyUrl } from '../../shared/cdpProxy.js';
 
 interface CloseResult {
   targetId: string;
@@ -24,7 +24,7 @@ export async function browserClose(params: {
 
   try {
     const response = await fetch(
-      `http://localhost:${CDP_PROXY.DEFAULT_PORT}/close?target=${targetId}`,
+      buildCdpProxyUrl('/close', { target: targetId }),
       {
         method: 'POST',
       }

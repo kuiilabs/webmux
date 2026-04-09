@@ -5,8 +5,15 @@
 
 import { success, error, pageError, networkError } from '../../shared/result.js';
 import type { ToolResult } from '../../shared/types.js';
-import { CDP_PROXY } from '../../shared/constants.js';
+import { buildCdpProxyUrl } from '../../shared/cdpProxy.js';
 import { tokenBudget } from '../../runtime/tokenBudget.js';
+import {
+  SECURITY_LIMITS,
+  ensureIntegerInRange,
+  ensureOptionalTextLength,
+  limitArray,
+  serializeJsString,
+} from '../../shared/security.js';
 
 interface BrowserExtractParams {
   targetId: string;
@@ -107,6 +114,16 @@ export async function browserExtract(params: BrowserExtractParams): Promise<Tool
     return error(pageError('缺少必要参数：targetId'));
   }
 
+  let validatedSelector: string | undefined;
+  let validatedMaxLength: number;
+  try {
+    validatedSelector = ensureOptionalTextLength('selector', selector, SECURITY_LIMITS.MAX_SELECTOR_LENGTH);
+    validatedMaxLength = ensureIntegerInRange('maxLength', maxLength, 1, SECURITY_LIMITS.MAX_INPUT_VALUE_LENGTH);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return error(pageError(message));
+  }
+
   // 选择提取脚本
   let script: string;
   switch (mode) {
@@ -117,11 +134,11 @@ export async function browserExtract(params: BrowserExtractParams): Promise<Tool
       script = EXTRACT_IMAGES_SCRIPT;
       break;
     case 'custom':
-      if (!selector) {
+      if (!validatedSelector) {
         return error(pageError('custom 模式需要 selector 参数'));
       }
       script = `(function() {
-        const el = document.querySelector('${selector.replace(/'/g, "\\'")}');
+        const el = document.querySelector(${serializeJsString(validatedSelector)});
         return el ? { content: el.innerText } : { content: null, error: '元素未找到' };
       })();`;
       break;
@@ -133,7 +150,7 @@ export async function browserExtract(params: BrowserExtractParams): Promise<Tool
   try {
     // 执行 JS 提取
     const response = await fetch(
-      `http://localhost:${CDP_PROXY.DEFAULT_PORT}/eval?target=${targetId}`,
+      buildCdpProxyUrl('/eval', { target: targetId }),
       {
         method: 'POST',
         headers: {
@@ -168,11 +185,15 @@ export async function browserExtract(params: BrowserExtractParams): Promise<Tool
       const estimate = tokenBudget.check(resultContent);
 
       // 如果超过限制，进行裁剪
-      if (estimate.exceedsHardLimit) {
+      if (estimate.strategy === 'reject') {
+        return error(pageError('提取内容超过 token 上限，已拒绝返回'));
+      }
+
+      if (estimate.strategy === 'chunked') {
         const processed = await tokenBudget.process(resultContent, 'chunked');
         resultContent = processed.chunks?.[0] || resultContent;
-      } else if (estimate.exceedsSoftLimit && maxLength) {
-        resultContent = resultContent.slice(0, maxLength);
+      } else if (estimate.strategy === 'extract_main') {
+        resultContent = resultContent.slice(0, validatedMaxLength);
       }
 
       const tokens = tokenBudget.estimate(resultContent as string);
@@ -189,16 +210,31 @@ export async function browserExtract(params: BrowserExtractParams): Promise<Tool
     }
 
     // 非文本内容（链接、图片等数组）
-    const tokens = tokenBudget.estimateObject(resultContent);
+    let finalContent = resultContent;
+    if (Array.isArray(resultContent)) {
+      const limited = limitArray(resultContent, SECURITY_LIMITS.MAX_RESULT_ITEMS);
+      finalContent = limited.items;
+
+      if (limited.truncated) {
+        metadata = {
+          ...metadata,
+          truncated: true,
+          totalItems: resultContent.length,
+          returnedItems: limited.items.length,
+        };
+      }
+    }
+
+    const tokens = tokenBudget.estimateObject(finalContent);
     return success(
       {
         targetId,
         mode,
-        content: resultContent,
+        content: finalContent,
         tokens,
         metadata,
       },
-      `提取完成，共 ${(resultContent as Array<unknown>).length || 1} 项`
+      `提取完成，共 ${(finalContent as Array<unknown>).length || 1} 项`
     );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

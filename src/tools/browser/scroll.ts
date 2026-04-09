@@ -4,7 +4,7 @@
 
 import { success, error, pageError, networkError } from '../../shared/result.js';
 import type { ToolResult } from '../../shared/types.js';
-import { CDP_PROXY } from '../../shared/constants.js';
+import { buildCdpProxyUrl } from '../../shared/cdpProxy.js';
 
 interface BrowserScrollParams {
   targetId: string;
@@ -56,7 +56,7 @@ export async function browserScroll(params: BrowserScrollParams): Promise<ToolRe
   try {
     const script = SCROLL_SCRIPT(direction, amount);
     const response = await fetch(
-      `http://localhost:${CDP_PROXY.DEFAULT_PORT}/eval?target=${targetId}`,
+      buildCdpProxyUrl('/eval', { target: targetId }),
       {
         method: 'POST',
         headers: {

@@ -4,7 +4,13 @@
 
 import { success, error, pageError, networkError } from '../../shared/result.js';
 import type { ToolResult } from '../../shared/types.js';
-import { CDP_PROXY } from '../../shared/constants.js';
+import { buildCdpProxyUrl } from '../../shared/cdpProxy.js';
+import {
+  SECURITY_LIMITS,
+  ensureNumberInRange,
+  ensureOptionalTextLength,
+  serializeJsString,
+} from '../../shared/security.js';
 
 interface BrowserWaitParams {
   targetId: string;
@@ -26,16 +32,18 @@ interface WaitResult {
  */
 const CHECK_SCRIPT = (selector?: string, text?: string) => `
 (function() {
+  const selector = ${serializeJsString(selector || '')};
+  const text = ${serializeJsString(text || '')};
   const result = { found: false };
 
-  if ('${selector || ''}') {
-    const el = document.querySelector('${selector?.replace(/'/g, "\\'") || ''}');
-    result.selectorFound = !!el;
+  if (selector) {
+    const el = document.querySelector(selector);
+    result.selectorFound = Boolean(el);
     result.visible = el ? el.offsetParent !== null : false;
   }
 
-  if ('${text || ''}') {
-    const textFound = document.body.innerText.includes('${text || ''}');
+  if (text) {
+    const textFound = document.body.innerText.includes(text);
     result.textFound = textFound;
   }
 
@@ -59,10 +67,20 @@ export async function browserWait(params: BrowserWaitParams): Promise<ToolResult
   let found = false;
 
   try {
-    while (Date.now() - startTime < timeout) {
-      const checkScript = CHECK_SCRIPT(selector, text);
+    const validatedSelector = ensureOptionalTextLength('selector', selector, SECURITY_LIMITS.MAX_SELECTOR_LENGTH);
+    const validatedText = ensureOptionalTextLength('text', text, SECURITY_LIMITS.MAX_TEXT_LENGTH);
+    const validatedTimeout = ensureNumberInRange('timeout', timeout, 1, SECURITY_LIMITS.MAX_WAIT_TIMEOUT_MS);
+    const validatedPollInterval = ensureNumberInRange(
+      'pollInterval',
+      pollInterval,
+      SECURITY_LIMITS.MIN_POLL_INTERVAL_MS,
+      SECURITY_LIMITS.MAX_POLL_INTERVAL_MS
+    );
+
+    while (Date.now() - startTime < validatedTimeout) {
+      const checkScript = CHECK_SCRIPT(validatedSelector, validatedText);
       const response = await fetch(
-        `http://localhost:${CDP_PROXY.DEFAULT_PORT}/eval?target=${targetId}`,
+        buildCdpProxyUrl('/eval', { target: targetId }),
         {
           method: 'POST',
           headers: {
@@ -84,7 +102,7 @@ export async function browserWait(params: BrowserWaitParams): Promise<ToolResult
       }
 
       // 等待下一次轮询
-      await sleep(pollInterval);
+      await sleep(validatedPollInterval);
     }
 
     const waitTime = Date.now() - startTime;
@@ -93,12 +111,12 @@ export async function browserWait(params: BrowserWaitParams): Promise<ToolResult
       {
         targetId,
         found,
-        type: found ? (selector ? 'selector' : 'text') : 'timeout',
+        type: found ? (validatedSelector ? 'selector' : 'text') : 'timeout',
         waitTime,
       },
       found
-        ? `等待 ${waitTime}ms 后找到${selector ? `元素 ${selector}` : `文本 "${text}"`}`
-        : `等待超时（${timeout}ms），未找到目标`
+        ? `等待 ${waitTime}ms 后找到${validatedSelector ? `元素 ${validatedSelector}` : `文本 "${validatedText}"`}`
+        : `等待超时（${validatedTimeout}ms），未找到目标`
     );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

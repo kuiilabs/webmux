@@ -156,34 +156,25 @@ export class ChannelRouter {
    * 获取降级链
    */
   private static getFallbackChain(
-    _primary: ChannelType,
+    primary: ChannelType,
     isDevTask = false
   ): ChannelType[] {
-    const allChannels: ChannelType[] = ['static', 'browser', 'automation', 'devtools'];
+    const priority: ChannelType[] = isDevTask
+      ? ['devtools', 'browser', 'automation', 'static']
+      : ['static', 'browser', 'automation', 'devtools'];
 
-    if (isDevTask) {
-      // 开发者任务降级链：DevTools → Browser → Automation → Static
-      return this.reorderChain(allChannels, ['devtools', 'browser', 'automation', 'static']);
-    } else {
-      // 通用降级链：Static → Browser → Automation → DevTools
-      return this.reorderChain(allChannels, ['static', 'browser', 'automation', 'devtools']);
-    }
+    return this.reorderChain(primary, priority);
   }
 
   /**
    * 重新排序降级链
    */
   private static reorderChain(
-    all: ChannelType[],
+    primary: ChannelType,
     priority: ChannelType[]
   ): ChannelType[] {
-    const result: ChannelType[] = [...priority];
-    for (const channel of all) {
-      if (!result.includes(channel)) {
-        result.push(channel);
-      }
-    }
-    return result;
+    const ordered = priority.filter(channel => channel !== primary);
+    return ordered;
   }
 
   /**

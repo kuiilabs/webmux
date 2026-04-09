@@ -9,9 +9,43 @@ node_modules/
 
 # OS
 .DS_Store
+Thumbs.db
 
 # Cache
 .cache/
+.rpt2_cache
+tsconfig.tsbuildinfo
 
 # Temp files
 *.tmp
+*.tmp
+tmp/
+temp/
+
+# IDE
+.vscode/*
+!.vscode/extensions.json
+.idea
+*.swp
+*.swo
+*~
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Testing
+coverage
+*.lcov
+
+# Web Agent specific
+.web-agent/
+/tmp/web-agent-*
+*.web-agent
+.rw-ports/
+
+# Screenshots and recordings
+*.png
+*.jpg
+*.mp4

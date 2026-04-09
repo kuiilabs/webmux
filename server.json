@@ -1,8 +1,8 @@
 {
-  "name": "web-agent",
+  "name": "webmux",
   "version": "0.1.0",
-  "description": "Web Agent Plugin - 面向 Agent 的统一网络操作系统",
-  "author": "Web Agent Team",
+  "description": "Webmux - 面向 Agent 的统一网络操作系统",
+  "author": "Webmux Team",
   "license": "MIT",
   "main": "dist/index.js",
   "type": "module",

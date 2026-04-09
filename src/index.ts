@@ -1,5 +1,5 @@
 /**
- * Web Agent Plugin 入口
+ * webmux 入口
  */
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -8,11 +8,11 @@ import { registerTools } from './tools/tools.js';
 import { logger } from './shared/logger.js';
 
 export async function main() {
-  logger.info('Web Agent Plugin 启动中...');
+  logger.info('webmux 启动中...');
 
   // 创建 MCP Server
   const server = new McpServer({
-    name: 'web-agent',
+    name: 'webmux',
     version: '0.1.0',
   });
 
@@ -23,7 +23,7 @@ export async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
-  logger.info('Web Agent Plugin 已就绪');
+  logger.info('webmux 已就绪');
 }
 
 // 错误处理

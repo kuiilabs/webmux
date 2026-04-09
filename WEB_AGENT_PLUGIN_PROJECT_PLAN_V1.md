@@ -1,8 +1,8 @@
-# Web Agent Plugin 项目方案 v1
+# webmux 项目方案 v1
 
 ## 1. 项目定位
 
-**Web Agent Plugin** 是一个以 Plugin 为交付形态的统一浏览器/联网执行框架。
+**webmux** 是一个以 Plugin 为交付形态的统一浏览器/联网执行框架。
 
 它融合两类能力：
 

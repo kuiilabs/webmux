@@ -1,17 +1,22 @@
 {
-  "name": "web-agent",
+  "name": "webmux",
   "version": "0.1.0",
-  "description": "Web Agent Plugin - 面向 Agent 的统一网络操作系统",
-  "author": "Web Agent Team",
+  "description": "Webmux - 面向 Agent 的统一网络操作系统",
+  "author": "Webmux Team",
   "license": "MIT",
   "main": "dist/index.js",
   "type": "module",
+  "bin": {
+    "webmux": "./dist/index.js"
+  },
   "scripts": {
     "dev": "node --watch scripts/dev.mjs",
     "build": "tsc && node scripts/build.mjs",
     "start": "node dist/index.js",
     "check-deps": "node scripts/check-deps.mjs",
-    "cleanup-ports": "node scripts/cleanup-ports.mjs"
+    "cleanup-ports": "node scripts/cleanup-ports.mjs",
+    "prepublishOnly": "npm run build",
+    "postinstall": "node scripts/postinstall.mjs || true"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",
@@ -26,9 +31,30 @@
   "engines": {
     "node": ">=22.0.0"
   },
+  "keywords": [
+    "webmux",
+    "web-agent",
+    "web-agent-plugin",
+    "browser-automation",
+    "mcp",
+    "claude-code",
+    "ai-agent",
+    "web-scraping",
+    "puppeteer",
+    "chrome-devtools"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/webmux/webmux.git"
+  },
+  "bugs": {
+    "url": "https://github.com/webmux/webmux/issues"
+  },
+  "homepage": "https://github.com/webmux/webmux#readme",
   "files": [
     "dist",
     "SKILL.md",
-    "references"
+    "references",
+    "scripts"
   ]
 }

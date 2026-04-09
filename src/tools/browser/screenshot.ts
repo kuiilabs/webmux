@@ -4,9 +4,8 @@
 
 import { success, error, pageError, networkError } from '../../shared/result.js';
 import type { ToolResult } from '../../shared/types.js';
-import { CDP_PROXY } from '../../shared/constants.js';
-import { mkdirSync } from 'fs';
-import { join } from 'path';
+import { buildCdpProxyUrl } from '../../shared/cdpProxy.js';
+import { ensureParentDirectory, resolveOutputPath, sanitizeFileComponent } from '../../shared/security.js';
 
 interface BrowserScreenshotParams {
   targetId: string;
@@ -42,28 +41,18 @@ export async function browserScreenshot(params: BrowserScreenshotParams): Promis
     return error(pageError('缺少必要参数：targetId'));
   }
 
-  // 生成文件路径
-  const filePath = file || join(
-    process.env.HOME || '/tmp',
-    '.cache',
-    'web-agent',
-    'screenshots',
-    `${targetId}_${Date.now()}.png`
-  );
-
-  // 确保目录存在
-  const dir = filePath.substring(0, filePath.lastIndexOf('/'));
   try {
-    mkdirSync(dir, { recursive: true });
-  } catch {
-    // 目录可能已存在
-  }
+    const filePath = resolveOutputPath(
+      'screenshots',
+      `${sanitizeFileComponent(targetId, 'target')}_${Date.now()}.png`,
+      file
+    );
+    ensureParentDirectory(filePath);
 
-  try {
     // 如果是全页截图，先获取页面尺寸
     if (fullPage) {
       const viewportResponse = await fetch(
-        `http://localhost:${CDP_PROXY.DEFAULT_PORT}/eval?target=${targetId}`,
+        buildCdpProxyUrl('/eval', { target: targetId }),
         {
           method: 'POST',
           headers: {
@@ -80,7 +69,11 @@ export async function browserScreenshot(params: BrowserScreenshotParams): Promis
     }
 
     // 调用截图 API
-    const screenshotUrl = `http://localhost:${CDP_PROXY.DEFAULT_PORT}/screenshot?target=${targetId}&file=${encodeURIComponent(filePath)}&fullPage=${fullPage}`;
+    const screenshotUrl = buildCdpProxyUrl('/screenshot', {
+      target: targetId,
+      file: filePath,
+      fullPage,
+    });
 
     const response = await fetch(screenshotUrl, {
       method: 'POST',

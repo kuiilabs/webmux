@@ -4,7 +4,7 @@
 
 import { success, error, networkError } from '../../shared/result.js';
 import type { ToolResult } from '../../shared/types.js';
-import { CDP_PROXY } from '../../shared/constants.js';
+import { buildCdpProxyUrl } from '../../shared/cdpProxy.js';
 
 interface ConsoleListParams {
   targetId: string;
@@ -29,7 +29,7 @@ export async function consoleList(params: ConsoleListParams): Promise<ToolResult
 
   try {
     // 获取控制台消息列表
-    const url = `http://localhost:${CDP_PROXY.DEFAULT_PORT}/console?target=${targetId}`;
+    const url = buildCdpProxyUrl('/console', { target: targetId });
     const response = await fetch(url);
 
     if (!response.ok) {

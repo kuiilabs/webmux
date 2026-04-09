@@ -55,6 +55,7 @@ const ERROR_PATTERNS: Record<ErrorType, RegExp[]> = {
 const HTTP_STATUS_MAP: Record<number, ErrorType> = {
   404: 'not_found',
   410: 'not_found',
+  401: 'antibot',
   403: 'antibot',
   429: 'network', // 限流，可重试
   502: 'network',
@@ -127,6 +128,13 @@ export class ErrorClassifier {
       if (typeof err.statusCode === 'number') return err.statusCode;
       if (typeof err.code === 'number') return err.code;
     }
+
+    const message = this.extractMessage(error);
+    const httpMatch = message.match(/\bHTTP\s+(\d{3})\b/i) || message.match(/\bstatus\s+(\d{3})\b/i);
+    if (httpMatch) {
+      return parseInt(httpMatch[1], 10);
+    }
+
     return null;
   }
 

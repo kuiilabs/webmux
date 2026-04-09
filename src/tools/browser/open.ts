@@ -4,7 +4,8 @@
 
 import { success, error, networkError } from '../../shared/result.js';
 import type { ToolResult } from '../../shared/types.js';
-import { CDP_PROXY } from '../../shared/constants.js';
+import { buildCdpProxyUrl } from '../../shared/cdpProxy.js';
+import { SECURITY_LIMITS, validateHttpUrl } from '../../shared/security.js';
 
 interface OpenResult {
   targetId: string;
@@ -25,8 +26,20 @@ export async function browserOpen(params: {
   }
 
   try {
+    const validatedUrl = validateHttpUrl(url);
+
+    const targetsResponse = await fetch(buildCdpProxyUrl('/targets'));
+    if (targetsResponse.ok) {
+      const targets = await targetsResponse.json() as unknown[];
+      if (targets.length >= SECURITY_LIMITS.MAX_BROWSER_TARGETS) {
+        return error(
+          networkError(`当前浏览器连接数已达上限 ${SECURITY_LIMITS.MAX_BROWSER_TARGETS}`, false)
+        );
+      }
+    }
+
     const response = await fetch(
-      `http://localhost:${CDP_PROXY.DEFAULT_PORT}/new?url=${encodeURIComponent(url)}&waitUntil=${waitUntil}`,
+      buildCdpProxyUrl('/new', { url: validatedUrl, waitUntil }),
       {
         method: 'POST',
       }
@@ -44,10 +57,10 @@ export async function browserOpen(params: {
     return success(
       {
         targetId,
-        url,
+        url: validatedUrl,
         title: data.title,
       },
-      `已在新 tab 中打开 ${url}`
+      `已在新 tab 中打开 ${validatedUrl}`
     );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

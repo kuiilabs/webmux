@@ -4,9 +4,9 @@
 
 import { success, error, networkError } from '../../shared/result.js';
 import type { ToolResult } from '../../shared/types.js';
-import { CDP_PROXY } from '../../shared/constants.js';
-import { writeFileSync, mkdirSync } from 'fs';
-import { join } from 'path';
+import { writeFileSync } from 'fs';
+import { buildCdpProxyUrl } from '../../shared/cdpProxy.js';
+import { ensureParentDirectory, resolveOutputPath, sanitizeFileComponent } from '../../shared/security.js';
 
 interface PerfTraceStopParams {
   targetId: string;
@@ -125,7 +125,7 @@ export async function perfTraceStop(params: PerfTraceStopParams): Promise<ToolRe
 
   try {
     const response = await fetch(
-      `http://localhost:${CDP_PROXY.DEFAULT_PORT}/eval?target=${targetId}`,
+      buildCdpProxyUrl('/eval', { target: targetId }),
       {
         method: 'POST',
         headers: {
@@ -154,15 +154,11 @@ export async function perfTraceStop(params: PerfTraceStopParams): Promise<ToolRe
 
     // 保存文件
     if (saveFile) {
-      const dir = join(
-        process.env.HOME || '/tmp',
-        '.cache',
-        'web-agent',
-        'perf-traces'
+      filePath = resolveOutputPath(
+        'perf-traces',
+        `trace_${sanitizeFileComponent(targetId, 'target')}_${Date.now()}.json`
       );
-      mkdirSync(dir, { recursive: true });
-
-      filePath = join(dir, `trace_${targetId}_${Date.now()}.json`);
+      ensureParentDirectory(filePath);
       writeFileSync(filePath, JSON.stringify(result, null, 2), 'utf-8');
     }
 

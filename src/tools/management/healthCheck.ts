@@ -4,7 +4,8 @@
 
 import { error, networkError } from '../../shared/result.js';
 import type { ToolResult } from '../../shared/types.js';
-import { execSync } from 'child_process';
+import { spawnSync } from 'child_process';
+import { buildCdpProxyUrl } from '../../shared/cdpProxy.js';
 
 interface HealthCheckData {
   node_version: string;
@@ -24,7 +25,15 @@ export async function healthCheck(): Promise<ToolResult<HealthCheckData>> {
 
   // 检查 Node.js 版本
   try {
-    const version = execSync('node --version', { encoding: 'utf-8' }).trim();
+    const versionResult = spawnSync(process.execPath, ['--version'], {
+      encoding: 'utf-8',
+    });
+
+    if (versionResult.status !== 0) {
+      throw new Error(versionResult.stderr || '无法获取版本');
+    }
+
+    const version = versionResult.stdout.trim();
     result.node_version = version;
     const major = parseInt(version.slice(1).split('.')[0], 10);
     result.node_ok = major >= 22;
@@ -46,10 +55,14 @@ export async function healthCheck(): Promise<ToolResult<HealthCheckData>> {
   // 检查 Chrome 远程调试端口
   for (let port = 9222; port <= 9299; port++) {
     try {
-      const output = execSync(
-        `curl -s http://127.0.0.1:${port}/json/version 2>/dev/null || echo ""`,
-        { encoding: 'utf-8' }
-      );
+      const response = await fetch(`http://127.0.0.1:${port}/json/version`, {
+        signal: AbortSignal.timeout(500),
+      });
+      if (!response.ok) {
+        continue;
+      }
+
+      const output = await response.text();
       if (output.includes('WebSocketDebuggerUrl')) {
         result.chrome_port_ok = true;
         break;
@@ -61,13 +74,16 @@ export async function healthCheck(): Promise<ToolResult<HealthCheckData>> {
 
   // 检查 CDP Proxy
   try {
-    const output = execSync(
-      'curl -s http://localhost:3456/targets 2>/dev/null || echo ""',
-      { encoding: 'utf-8' }
-    );
-    if (output.includes('[')) {
-      result.proxy_ok = true;
-      result.proxy_port = 3456;
+    const response = await fetch(buildCdpProxyUrl('/targets'), {
+      signal: AbortSignal.timeout(500),
+    });
+
+    if (response.ok) {
+      const output = await response.text();
+      if (output.includes('[')) {
+        result.proxy_ok = true;
+        result.proxy_port = 3456;
+      }
     }
   } catch {
     // Proxy 未运行

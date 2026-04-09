@@ -4,7 +4,7 @@
 
 import { success, error, networkError } from '../../shared/result.js';
 import type { ToolResult } from '../../shared/types.js';
-import { CDP_PROXY } from '../../shared/constants.js';
+import { buildCdpProxyUrl } from '../../shared/cdpProxy.js';
 
 interface PerfTraceStartParams {
   targetId: string;
@@ -62,7 +62,7 @@ export async function perfTraceStart(params: PerfTraceStartParams): Promise<Tool
 
   try {
     const response = await fetch(
-      `http://localhost:${CDP_PROXY.DEFAULT_PORT}/eval?target=${targetId}`,
+      buildCdpProxyUrl('/eval', { target: targetId }),
       {
         method: 'POST',
         headers: {

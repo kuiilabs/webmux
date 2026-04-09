@@ -7,6 +7,7 @@ import type { ToolResult } from '../../shared/types.js';
 import { taskRegistry } from '../../runtime/taskRegistry.js';
 import { mergeSubAgentResults } from '../../runtime/summaryProtocol.js';
 import type { SubAgentResult } from '../../runtime/parallelTypes.js';
+import { SECURITY_LIMITS } from '../../shared/security.js';
 
 interface AgentResultMergeParams {
   taskIds?: string[];
@@ -32,6 +33,27 @@ interface AgentResultMergeResult {
 
 export async function agentResultMerge(params: AgentResultMergeParams = {}): Promise<ToolResult<AgentResultMergeResult>> {
   const { taskIds, statusFilter } = params;
+
+  // 验证 taskIds（可选）
+  if (taskIds) {
+    if (!Array.isArray(taskIds)) {
+      return error({
+        type: 'page',
+        message: 'taskIds 必须是数组格式',
+        suggestion: '请提供任务 ID 数组',
+        retryable: false,
+      });
+    }
+
+    if (taskIds.length > SECURITY_LIMITS.MAX_ARTIFACTS * 2) {
+      return error({
+        type: 'page',
+        message: `taskIds 数量超过限制`,
+        suggestion: `最多只能合并 ${SECURITY_LIMITS.MAX_ARTIFACTS * 2} 个任务结果`,
+        retryable: false,
+      });
+    }
+  }
 
   try {
     // 获取任务列表

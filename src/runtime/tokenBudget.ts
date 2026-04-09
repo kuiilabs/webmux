@@ -49,8 +49,12 @@ export class TokenBudgetController {
    */
   static estimateObject(obj: unknown): number {
     if (!obj) return 0;
-    const json = JSON.stringify(obj);
-    return this.estimate(json);
+    try {
+      const json = JSON.stringify(obj);
+      return this.estimate(json);
+    } catch {
+      return TOKEN_BUDGET.MAX_LIMIT + 1;
+    }
   }
 
   /**

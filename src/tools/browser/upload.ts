@@ -4,8 +4,9 @@
 
 import { success, error, pageError, networkError } from '../../shared/result.js';
 import type { ToolResult } from '../../shared/types.js';
-import { CDP_PROXY } from '../../shared/constants.js';
 import { existsSync } from 'fs';
+import { buildCdpProxyUrl } from '../../shared/cdpProxy.js';
+import { SECURITY_LIMITS, assertPathInSandbox, ensureTextLength, serializeJsString } from '../../shared/security.js';
 
 interface BrowserUploadParams {
   targetId: string;
@@ -25,7 +26,7 @@ interface UploadResult {
  */
 const CHECK_INPUT_SCRIPT = (selector: string) => `
 (function() {
-  const el = document.querySelector('${selector.replace(/'/g, "\\'")}');
+  const el = document.querySelector(${serializeJsString(selector)});
   if (!el) {
     return { found: false, error: '元素未找到' };
   }
@@ -51,21 +52,31 @@ export async function browserUpload(params: BrowserUploadParams): Promise<ToolRe
     return error(pageError('缺少必要参数：files'));
   }
 
-  // 检查文件是否存在
-  const existingFiles = files.filter(f => existsSync(f));
-  if (existingFiles.length === 0) {
-    return error(pageError(`文件不存在：${files.join(', ')}`));
+  let validatedSelector: string;
+  let sandboxedFiles: string[];
+  try {
+    validatedSelector = ensureTextLength('selector', selector, SECURITY_LIMITS.MAX_SELECTOR_LENGTH);
+    sandboxedFiles = files.map(file => assertPathInSandbox(file, '上传文件'));
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return error(pageError(message));
   }
-  if (existingFiles.length < files.length) {
-    const missing = files.filter(f => !existsSync(f));
+
+  // 检查文件是否存在
+  const existingFiles = sandboxedFiles.filter(f => existsSync(f));
+  if (existingFiles.length === 0) {
+    return error(pageError(`文件不存在：${sandboxedFiles.join(', ')}`));
+  }
+  if (existingFiles.length < sandboxedFiles.length) {
+    const missing = sandboxedFiles.filter(f => !existsSync(f));
     return error(pageError(`部分文件不存在：${missing.join(', ')}`));
   }
 
   try {
     // 第一步：检查元素
-    const checkScript = CHECK_INPUT_SCRIPT(selector);
+    const checkScript = CHECK_INPUT_SCRIPT(validatedSelector);
     const checkResponse = await fetch(
-      `http://localhost:${CDP_PROXY.DEFAULT_PORT}/eval?target=${targetId}`,
+      buildCdpProxyUrl('/eval', { target: targetId }),
       {
         method: 'POST',
         headers: {
@@ -86,9 +97,9 @@ export async function browserUpload(params: BrowserUploadParams): Promise<ToolRe
     }
 
     // 第二步：调用 setFiles API
-    const setFilesBody = JSON.stringify({ selector, files: existingFiles });
+    const setFilesBody = JSON.stringify({ selector: validatedSelector, files: existingFiles });
     const setFilesResponse = await fetch(
-      `http://localhost:${CDP_PROXY.DEFAULT_PORT}/setFiles?target=${targetId}`,
+      buildCdpProxyUrl('/setFiles', { target: targetId }),
       {
         method: 'POST',
         headers: {
@@ -105,11 +116,11 @@ export async function browserUpload(params: BrowserUploadParams): Promise<ToolRe
     return success(
       {
         targetId,
-        selector,
+        selector: validatedSelector,
         files: existingFiles,
         uploaded: true,
       },
-      `已上传 ${existingFiles.length} 个文件到 ${selector}`
+      `已上传 ${existingFiles.length} 个文件到 ${validatedSelector}`
     );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

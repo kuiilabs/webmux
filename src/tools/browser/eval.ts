@@ -4,7 +4,8 @@
 
 import { success, error, pageError, networkError } from '../../shared/result.js';
 import type { ToolResult } from '../../shared/types.js';
-import { CDP_PROXY } from '../../shared/constants.js';
+import { buildCdpProxyUrl } from '../../shared/cdpProxy.js';
+import { SECURITY_LIMITS, ensureTextLength } from '../../shared/security.js';
 
 interface EvalResult {
   targetId: string;
@@ -31,14 +32,15 @@ export async function browserEval(params: {
   }
 
   try {
+    const validatedScript = ensureTextLength('script', script, SECURITY_LIMITS.MAX_SCRIPT_LENGTH);
     const response = await fetch(
-      `http://localhost:${CDP_PROXY.DEFAULT_PORT}/eval?target=${targetId}`,
+      buildCdpProxyUrl('/eval', { target: targetId }),
       {
         method: 'POST',
         headers: {
           'Content-Type': 'text/plain',
         },
-        body: script,
+        body: validatedScript,
       }
     );
 
