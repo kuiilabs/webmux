@@ -1,6 +1,6 @@
 {
   "name": "@kuiil/webmux",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Webmux - 面向 Agent 的统一网络操作系统",
   "author": "Webmux Team",
   "license": "MIT",
