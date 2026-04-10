@@ -3,7 +3,7 @@
 [![npm version](https://img.shields.io/npm/v/webmux.svg)](https://www.npmjs.com/package/webmux)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js >= 22](https://img.shields.io/badge/node-%3E%3D22-green.svg)](https://nodejs.org/)
-[![Security Audit](https://img.shields.io/badge/security-audited-green.svg)](./SECURITY_AUDIT.md)
+[![Security Audit](https://img.shields.io/badge/security-audited-green.svg)](docs/security/SECURITY_AUDIT.md)
 
 > **面向 AI Agent 的统一网络操作系统**
 > 
@@ -186,7 +186,7 @@ webmux 提供 **28 个 MCP 工具**，分为 4 个阶段：
 
 **背后执行**: `perf_trace_start` → 页面加载 → `perf_trace_stop` → `perf_analyze`
 
-更多示例请查看 [`examples/`](examples/) 目录或 [USER_GUIDE.md](./USER_GUIDE.md)。
+更多示例请查看 [`examples/`](examples/) 目录或 [docs/USER_GUIDE.md](docs/USER_GUIDE.md)。
 
 ---
 
@@ -262,7 +262,7 @@ webmux 提供 **28 个 MCP 工具**，分为 4 个阶段：
 - ✅ 子 Agent 参数长度限制
 - ✅ SSRF 内网地址识别
 
-详见 [SECURITY_AUDIT.md](./SECURITY_AUDIT.md) 和 [ADVERSARIAL_TEST_REPORT.md](./ADVERSARIAL_TEST_REPORT.md)。
+详见 [docs/security/SECURITY_AUDIT.md](docs/security/SECURITY_AUDIT.md) 和 [docs/security/ADVERSARIAL_TEST_REPORT.md](docs/security/ADVERSARIAL_TEST_REPORT.md)。
 
 ---
 
@@ -270,14 +270,14 @@ webmux 提供 **28 个 MCP 工具**，分为 4 个阶段：
 
 | 文档 | 说明 |
 |------|------|
-| [USER_GUIDE.md](./USER_GUIDE.md) | 完整使用教程 |
-| [SKILL.md](./SKILL.md) | 决策层规范 |
-| [SECURITY_AUDIT.md](./SECURITY_AUDIT.md) | 安全审计报告 |
-| [ADVERSARIAL_TEST_REPORT.md](./ADVERSARIAL_TEST_REPORT.md) | 对抗性测试报告 |
-| [COMPETITIVE_ANALYSIS.md](./COMPETITIVE_ANALYSIS.md) | 竞品分析 |
-| [OPTIMIZATION_ROADMAP.md](./OPTIMIZATION_ROADMAP.md) | 优化路线图 |
-| [CHANGELOG.md](./CHANGELOG.md) | 版本变更日志 |
-| [RELEASE_NOTES.md](./RELEASE_NOTES.md) | 发布说明 |
+| [USER_GUIDE.md](docs/USER_GUIDE.md) | 完整使用教程 |
+| [SKILL.md](SKILL.md) | 决策层规范 |
+| [SECURITY_AUDIT.md](docs/security/SECURITY_AUDIT.md) | 安全审计报告 |
+| [ADVERSARIAL_TEST_REPORT.md](docs/security/ADVERSARIAL_TEST_REPORT.md) | 对抗性测试报告 |
+| [COMPETITIVE_ANALYSIS.md](docs/internals/COMPETITIVE_ANALYSIS.md) | 竞品分析 |
+| [OPTIMIZATION_ROADMAP.md](docs/internals/OPTIMIZATION_ROADMAP.md) | 优化路线图 |
+| [CHANGELOG.md](CHANGELOG.md) | 版本变更日志 |
+| [RELEASE_NOTES.md](docs/internals/RELEASE_NOTES.md) | 发布说明 |
 
 ---
 
@@ -325,9 +325,9 @@ node scripts/adversarial-test.mjs
 
 ## 📬 反馈与支持
 
-- **问题反馈**: https://github.com/webmux/webmux/issues
-- **讨论区**: https://github.com/webmux/webmux/discussions
-- **文档**: https://github.com/webmux/webmux#readme
+- **问题反馈**: https://github.com/kuiilabs/webmux/issues
+- **讨论区**: https://github.com/kuiilabs/webmux/discussions
+- **文档**: https://github.com/kuiilabs/webmux#readme
 
 ---
 

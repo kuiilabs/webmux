@@ -630,10 +630,10 @@ export WEB_AGENT_OUTPUT_DIR=/tmp/web-agent-output
 
 | 文档 | 说明 |
 |------|------|
-| [SKILL.md](./SKILL.md) | 决策层文档 |
-| [SECURITY_AUDIT.md](./SECURITY_AUDIT.md) | 安全审计报告 |
-| [COMPETITIVE_ANALYSIS.md](./COMPETITIVE_ANALYSIS.md) | 竞品分析报告 |
-| [OPTIMIZATION_ROADMAP.md](./OPTIMIZATION_ROADMAP.md) | 优化路线图 |
+| [SKILL.md](../SKILL.md) | 决策层文档 |
+| [SECURITY_AUDIT.md](security/SECURITY_AUDIT.md) | 安全审计报告 |
+| [COMPETITIVE_ANALYSIS.md](internals/COMPETITIVE_ANALYSIS.md) | 竞品分析报告 |
+| [OPTIMIZATION_ROADMAP.md](internals/OPTIMIZATION_ROADMAP.md) | 优化路线图 |
 
 ---
 

@@ -146,7 +146,7 @@ npx web-agent check-deps
 分析一下 https://example.com 的性能问题
 ```
 
-更多示例请查看 `examples/` 目录或 [USER_GUIDE.md](./USER_GUIDE.md)。
+更多示例请查看 `examples/` 目录或 [../USER_GUIDE.md](../USER_GUIDE.md)。
 
 ---
 
@@ -154,13 +154,13 @@ npx web-agent check-deps
 
 | 文档 | 说明 |
 |------|------|
-| [README.md](./README.md) | 项目介绍和快速开始 |
-| [USER_GUIDE.md](./USER_GUIDE.md) | 完整使用教程 |
-| [SKILL.md](./SKILL.md) | 决策层规范 |
-| [SECURITY_AUDIT.md](./SECURITY_AUDIT.md) | 安全审计报告 |
+| [README.md](../README.md) | 项目介绍和快速开始 |
+| [USER_GUIDE.md](../USER_GUIDE.md) | 完整使用教程 |
+| [SKILL.md](../SKILL.md) | 决策层规范 |
+| [SECURITY_AUDIT.md](../security/SECURITY_AUDIT.md) | 安全审计报告 |
 | [COMPETITIVE_ANALYSIS.md](./COMPETITIVE_ANALYSIS.md) | 竞品分析报告 |
 | [OPTIMIZATION_ROADMAP.md](./OPTIMIZATION_ROADMAP.md) | 优化路线图 |
-| [CHANGELOG.md](./CHANGELOG.md) | 版本变更日志 |
+| [CHANGELOG.md](../CHANGELOG.md) | 版本变更日志 |
 
 ---
 
@@ -196,7 +196,7 @@ npm run cleanup-ports
 - ✅ HTTP 响应大小限制（`webFetch`）
 - ✅ Token 预算异常处理（`tokenBudget`）
 
-详见 [SECURITY_AUDIT.md](./SECURITY_AUDIT.md)。
+详见 [../security/SECURITY_AUDIT.md](../security/SECURITY_AUDIT.md)。
 
 ---
 
