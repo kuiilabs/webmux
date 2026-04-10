@@ -6,7 +6,7 @@
 set -e
 
 INSTALL_DIR="$HOME/.webmux"
-REPO_URL="https://github.com/webmux/webmux.git"
+REPO_URL="https://github.com/kuiilabs/webmux.git"
 
 echo "🚀 webmux 快速安装..."
 

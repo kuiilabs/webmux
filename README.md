@@ -30,10 +30,10 @@
 
 ```bash
 # 快速安装（非交互式）
-curl -fsSL https://raw.githubusercontent.com/webmux/webmux/main/scripts/install-quick.sh | bash
+curl -fsSL https://raw.githubusercontent.com/kuiilabs/webmux/main/scripts/install-quick.sh | bash
 
 # 完整安装（交互式配置）
-curl -fsSL https://raw.githubusercontent.com/webmux/webmux/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/kuiilabs/webmux/main/install.sh | bash
 ```
 
 ### 方式二：NPM 安装
@@ -49,7 +49,7 @@ npm install webmux
 ### 方式三：从源码安装
 
 ```bash
-git clone https://github.com/webmux/webmux.git
+git clone https://github.com/kuiilabs/webmux.git
 cd webmux
 npm install
 npm run build

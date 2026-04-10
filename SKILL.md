@@ -1,7 +1,7 @@
 ---
 name: web-agent
 license: MIT
-github: https://github.com/web-agent/web-agent
+github: https://github.com/kuiilabs/webmux
 description:
   面向 Agent 的统一网络操作系统。整合搜索、网页抓取、浏览器自动化、性能分析于一体。
 metadata:

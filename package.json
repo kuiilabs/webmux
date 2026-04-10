@@ -1,5 +1,5 @@
 {
-  "name": "webmux",
+  "name": "@kuiil/webmux",
   "version": "0.1.0",
   "description": "Webmux - 面向 Agent 的统一网络操作系统",
   "author": "Webmux Team",
@@ -45,12 +45,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/webmux/webmux.git"
+    "url": "https://github.com/kuiilabs/webmux.git"
   },
   "bugs": {
-    "url": "https://github.com/webmux/webmux/issues"
+    "url": "https://github.com/kuiilabs/webmux/issues"
   },
-  "homepage": "https://github.com/webmux/webmux#readme",
+  "homepage": "https://github.com/kuiilabs/webmux#readme",
   "files": [
     "dist",
     "SKILL.md",

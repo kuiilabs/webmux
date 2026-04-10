@@ -49,3 +49,12 @@ coverage
 *.png
 *.jpg
 *.mp4
+
+# Obsidian
+.obsidian/
+
+# webmux runtime
+.web-agent/
+/tmp/web-agent-*
+*.web-agent
+.rw-ports/
