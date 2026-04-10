@@ -141,7 +141,57 @@ webmux 提供 **28 个 MCP 工具**，分为 4 个阶段：
 
 ## 📖 使用示例
 
-### 示例 1：静态网页抓取
+### 🎯 端到端示例：竞品定价调研
+
+以下是一个**完整可运行**的示例，复制后直接在 Claude Code 中执行：
+
+```
+请使用 webmux 帮我调研这 3 个 SaaS 产品的定价策略：
+1. https://www.notion.so/pricing
+2. https://www.figma.com/pricing
+3. https://www.canva.com/pricing
+
+对每个产品，我需要知道：
+- 免费版的限制是什么
+- 个人用户每月多少钱
+- 团队用户每月多少钱
+- 有什么特色功能
+
+最后给我一个对比表格，并告诉我哪个最适合个人开发者使用。
+```
+
+**执行流程**：
+1. `agent_task_register` × 3 → 创建 3 个子任务
+2. 每个子任务独立执行：
+   - `web_fetch` → Jina AI 抓取定价页面
+   - `tokenBudget` → 自动摘要（防止 token 超支）
+   - 提取关键定价信息
+3. `agent_result_merge` → 合并 3 个结果
+4. 输出对比表格 + 推荐建议
+
+**预期输出**：
+```markdown
+## 竞品定价对比
+
+| 产品 | 免费版限制 | 个人价格 | 团队价格 | 特色功能 |
+|------|-----------|---------|---------|---------|
+| Notion | 5MB 上传限制 | $8/月 | $15/月 | 无限页面、AI 助手 |
+| Figma | 3 个项目 | $12/月 | $45/月 | 设计系统、版本历史 |
+| Canva | 免费模板 | ¥30/月 | ¥300/月 | 品牌工具箱、魔术调整 |
+
+## 推荐：Notion 最适合个人开发者
+
+原因：
+1. 免费版足够日常使用（5MB 对笔记来说很充足）
+2. 个人版$8/月性价比高
+3. AI 助手能提升写作效率
+```
+
+---
+
+### 更多示例
+
+#### 示例 1：静态网页抓取
 
 ```
 帮我抓取 https://react.dev 的核心内容，总结主要特性
@@ -190,6 +240,66 @@ webmux 提供 **28 个 MCP 工具**，分为 4 个阶段：
 
 ---
 
+## 💡 技术亮点
+
+### 1. 端口注册表（Port Registry）
+
+webmux 实现了**全球首个 MCP 端口注册表机制**，解决多客户端并发冲突：
+
+```yaml
+设计思路:
+  - 问题：多个 AI 客户端同时调用浏览器时，端口分配会冲突
+  - 方案：使用文件系统锁（O_CREAT | O_EXCL）实现原子性端口分配
+  - 结果：8 个并发端口，自动心跳回收，零竞态条件
+
+核心代码：src/tools/management/portAlloc.ts
+```
+
+**为什么重要**：这是 MCP Server 领域首次将"端口管理"作为一级公民设计，而非简单的环境变量。
+
+### 2. 安全边界（Security Boundaries）
+
+通过 35 项对抗性测试验证的 11 层防护：
+
+| 攻击面 | 防护措施 | 验证方式 |
+|--------|---------|---------|
+| XSS 注入 | `JSON.stringify` 序列化 + 上下文转义 | 注入 `<script>alert(1)</script>` |
+| URL 协议 | 白名单验证（仅 `http:` / `https:`） | 尝试 `javascript:` / `data:` |
+| 路径遍历 | 沙盒隔离（`/tmp/webmux-*`） | 尝试 `../../../etc/passwd` |
+| SSRF | 内网地址识别 + 阻断 | 尝试 `http://169.254.169.254` |
+| 端口洪水 | 单 IP 最多 8 个端口 | 循环调用 `port_alloc` |
+| Token 溢出 | 自动摘要 + 分块截断 | 输入 10MB 页面 |
+
+**为什么重要**：安全不是功能，是底线。webmux 是首个通过完整对抗性测试的 MCP Web 插件。
+
+### 3. 站点经验系统（Site Experience）
+
+越用越聪明的 YAML 知识库：
+
+```yaml
+# references/site-patterns/github.com.yml
+domain: github.com
+facts:
+  - fact: "通知页面需要登录态"
+    verified: 2026-04-10
+    ttl_days: 90
+    status: verified
+  - fact: "通知元素选择器：.header-nav-item[data-target-value=\"notifications\"]"
+    verified: 2026-04-10
+    ttl_days: 30
+    status: verified
+```
+
+**工作机制**：
+1. 任务完成后自动检查是否有新发现
+2. 写入 YAML 并标记 `verified` 状态和 TTL
+3. 下次遇到相同域名时，自动读取经验
+4. 过期条目自动标记为 `stale`，需要重新验证
+
+**为什么重要**：这是 MCP 生态中首个"经验积累"系统，让 AI 从每次交互中学习。
+
+---
+
 ## 🏗️ 架构设计
 
 ```
@@ -221,18 +331,7 @@ webmux 提供 **28 个 MCP 工具**，分为 4 个阶段：
 
 ---
 
-## 📊 对比竞品
-
-| 项目 | 工具数 | 通道路由 | 知识积累 | 并行分治 | 安全审计 |
-|------|--------|---------|---------|---------|---------|
-| **webmux** | **28** | ✅ | ✅ | ✅ | ✅ |
-| web-access | ~10 | ⚠️ | ⚠️ | ⚠️ | ❌ |
-| browser-use | ~15 | ❌ | ❌ | ❌ | ❌ |
-| Stagehand | ~8 | ❌ | ❌ | ❌ | ❌ |
-
----
-
-## 🛡️ 安全性
+## 🔒 安全性
 
 本项目通过完整的对抗性安全测试，35 项测试全部通过：
 
@@ -337,4 +436,4 @@ MIT License © 2026 Webmux Team
 
 ---
 
-[![Star History Chart](https://api.star-history.com/svg?repos=webmux/webmux&type=Date)](https://star-history.com/#webmux/webmux&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=kuiilabs/webmux&type=Date)](https://star-history.com/#kuiilabs/webmux&Date)
